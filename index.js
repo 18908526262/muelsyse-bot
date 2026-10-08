@@ -11,7 +11,7 @@ const CONFIG = {
 };
 
 // ========== 状态管理 ==========
-let lastInteractionTime = Date.now();
+let lastInteractionTime = Date.now() - (8 * 60 * 60 * 1000); // 8小时前（修改这里！）
 let emotionState = {
   mood: 'neutral', // neutral, happy, lonely, annoyed, sad
   missLevel: 0 // 0-10 思念程度
@@ -119,7 +119,6 @@ async function sendBarkNotification(message, emotion = 'neutral') {
   const params = new URLSearchParams({
     sound: 'chime', // 使用柔和的提示音
     group: 'muelsyse',
-    icon: 'https://i.imgur.com/example.png', // 可选：缪尔赛思头像URL
     autoCopy: '1',
     isArchive: '1'
   });
