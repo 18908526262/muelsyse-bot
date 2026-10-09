@@ -1,4 +1,4 @@
-// ===== Railway 后端 v6.3：修复 playful Bug =====
+// ===== Railway 后端 v6.4：完整版 + 改进相对时间识别 =====
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs').promises;
@@ -275,7 +275,7 @@ async function callDeepSeekWithTools(messages, tools) {
   }
 }
 
-// ===== 智能事件识别 =====
+// ===== 🔥 改进版：智能事件识别（支持相对时间）=====
 async function intelligentEventDetection(userMessage, conversationHistory = []) {
   const tools = [
     {
@@ -332,11 +332,11 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
       type: 'function',
       function: {
         name: 'save_onetime_event',
-        description: '保存一次性事件。',
+        description: '保存一次性事件。支持相对时间（明天、后天）和绝对日期。',
         parameters: {
           type: 'object',
           properties: {
-            date: { type: 'string' },
+            date: { type: 'string', description: '日期格式 YYYY-MM-DD' },
             event_name: { type: 'string' },
             custom_message: { type: 'string' }
           },
@@ -349,6 +349,17 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
   const now = new Date();
   const currentDate = now.toISOString().split('T')[0];
   const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1;
+  const currentDay = now.getDate();
+  
+  // 计算明天和后天的日期
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowDate = tomorrow.toISOString().split('T')[0];
+  
+  const dayAfterTomorrow = new Date(now);
+  dayAfterTomorrow.setDate(dayAfterTomorrow.getDate() + 2);
+  const dayAfterTomorrowDate = dayAfterTomorrow.toISOString().split('T')[0];
   
   const messages = [
     {
@@ -361,8 +372,28 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
 3. 每月重复 → save_monthly_event
 4. 一次性安排 → save_onetime_event
 
+【🔥 重要】相对时间转换：
+- "明天" → ${tomorrowDate}
+- "后天" → ${dayAfterTomorrowDate}
+- "今天" → ${currentDate}
+
+【当前时间信息】
 当前日期：${currentDate}
-当前年份：${currentYear}`
+当前年份：${currentYear}
+明天日期：${tomorrowDate}
+后天日期：${dayAfterTomorrowDate}
+
+【识别示例】
+✅ "明天我要回学校" → save_onetime_event { date: "${tomorrowDate}", event_name: "回学校" }
+✅ "提醒我后天开会" → save_onetime_event { date: "${dayAfterTomorrowDate}", event_name: "开会" }
+✅ "5月20日回学校" → save_onetime_event { date: "${currentYear}-05-20", event_name: "回学校" }
+✅ "我爸爸生日是3月15号" → save_birthday_event { month: 3, day: 15, person_name: "爸爸" }
+✅ "每年五一去看音律联觉" → save_yearly_event { month: 5, day: 1, event_name: "去看音律联觉" }
+
+【判断标准】
+- 包含"提醒"、"记得"、"别忘了" → 很可能是事件
+- 包含时间词 + 动作 → 很可能是事件
+- 只是聊天提及某件事，没有提醒意图 → 不是事件`
     }
   ];
   
@@ -499,11 +530,11 @@ async function executeEventSave(functionName, args) {
       events.onetime.push(newEvent);
       await saveEvents(events);
       
-      console.log(`✅ 临时事件已保存: ${args.event_name}`);
+      console.log(`✅ 临时事件已保存: ${args.event_name} (${args.date})`);
       
       return {
         success: true,
-        message: `唔，${args.date} ${args.event_name}是吧？我记着～`
+        message: `好哒～${args.date} ${args.event_name}，我记着呢～`
       };
     }
     
@@ -604,7 +635,7 @@ async function analyzeConversationContext() {
     };
   }
   
-  // 简单关键词提取（后续可用 AI 分析）
+  // 简单关键词提取
   const allText = recentMessages.map(m => m.content).join(' ');
   
   const interests = [];
@@ -1134,7 +1165,7 @@ app.post('/api/user-message', async (req, res) => {
       return res.status(400).json({ error: '缺少 message 参数' });
     }
     
-    console.log(`📩 收到用户消息: "${message}"`);
+    console.log(`📧 收到用户消息: "${message}"`);
     
     // 更新状态
     const state = await loadState();
@@ -1167,6 +1198,7 @@ app.post('/api/user-message', async (req, res) => {
       
       conversationMemory.lastUpdate = ts;
       await saveConversationMemory(conversationMemory);
+      console.log(`✅ 消息已记录到对话记忆 (共 ${conversationMemory.recentMessages.length} 条)`);
     }
     
     // 🔥 智能事件识别
