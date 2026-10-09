@@ -1,4 +1,4 @@
-// ===== Railway 后端 v6.1：热恋模式 + 完整记忆同步 =====
+// ===== Railway 后端 v6.2：热恋模式 + 完整记忆同步 + 修复 playful Bug =====
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs').promises;
@@ -728,18 +728,36 @@ emotion 选择：happy/playful/coax/lonely/concerned 中的一个（单独一行
     const text = response.data.choices[0].message.content.trim();
     const lines = text.split('\n').filter(l => l.trim());
     
-    let message = lines[0];
+    let message = '';
     let emotion = 'coax';
     
-    // 尝试解析 emotion
-    if (lines.length > 1) {
+    // 🔥 修复：先尝试解析最后一行是否为 emotion
+    if (lines.length > 0) {
       const lastLine = lines[lines.length - 1].toLowerCase();
+      
       if (['happy', 'playful', 'coax', 'lonely', 'concerned'].includes(lastLine)) {
+        // 最后一行是 emotion，前面的都是消息内容
         emotion = lastLine;
-        message = lines.slice(0, -1).join(' ');
+        message = lines.slice(0, -1).join(' ').trim();
+      } else {
+        // 最后一行不是 emotion，全部当作消息内容
+        message = lines.join(' ').trim();
       }
     }
     
+    // 🔥 安全检查：如果消息为空或看起来像 emotion，使用 fallback
+    if (!message || message.length < 5 || ['happy', 'playful', 'coax', 'lonely', 'concerned'].includes(message.toLowerCase())) {
+      console.warn('⚠️ AI 返回内容异常，使用 fallback');
+      console.warn('原始返回:', text);
+      const fallbacks = [
+        { message: '小鲨～在忙什么呀？想你了～', emotion: 'coax', type: 'miss' },
+        { message: '唔，你最近都在忙什么呢？', emotion: 'lonely', type: 'greeting' },
+        { message: '嘿嘿，我在这里哦～', emotion: 'playful', type: 'greeting' }
+      ];
+      return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    }
+    
+    console.log(`✅ AI 生成消息: "${message}" (${emotion})`);
     return { message, emotion, type: topicType };
     
   } catch (err) {
@@ -889,6 +907,8 @@ async function sendBarkNotification(title, message, emotion = 'happy') {
     
     const url = `https://api.day.app/${CONFIG.BARK_KEY}/${encodeURIComponent(title)}/${encodeURIComponent(message)}?sound=${sound}&group=muelsyse&url=${encodeURIComponent(callbackUrl)}`;
     
+    console.log(`📤 发送 Bark: "${message}" (${emotion})`);
+    
     await axios.get(url, { timeout: 10000 });
     console.log('✅ Bark 推送成功');
     return true;
@@ -898,188 +918,133 @@ async function sendBarkNotification(title, message, emotion = 'happy') {
   }
 }
 
-// ===== 🔥 主循环（超高频模式）=====
-async function mainLoop() {
-  try {
-    // 检查固定事件
-    await checkTodayEvents();
+// ===== 🔥 主动推送消息并记录 =====
+async function executeProactivePush() {
+  const decision = await shouldSendProactiveMessage();
+  
+  if (decision.shouldSend) {
+    // 分析对话上下文
+    const analysis = await analyzeConversationContext();
     
-    // 超高频主动推送
-    const decision = await shouldSendProactiveMessage();
+    // 生成上下文相关消息
+    const { message, emotion, type } = await generateContextualMessage(decision, analysis);
     
-    if (decision.shouldSend) {
-      // 分析对话上下文
-      const analysis = await analyzeConversationContext();
+    const success = await sendBarkNotification('缪尔赛思', message, emotion);
+    
+    if (success) {
+      const state = await loadState();
+      state.lastProactiveMessageTime = Date.now();
       
-      // 生成上下文相关消息
-      const { message, emotion, type } = await generateContextualMessage(decision, analysis);
+      // 🔥 记录主动推送到对话记忆（添加去重）
+      const conversationMemory = await loadConversationMemory();
+      const timestamp = Date.now();
       
-      const success = await sendBarkNotification('缪尔赛思', message, emotion);
+      // 检查是否已存在（60秒内相同内容算重复）
+      const exists = conversationMemory.recentMessages.some(m => 
+        m.content === message && 
+        Math.abs((m.timestamp || 0) - timestamp) < 60000
+      );
       
-      if (success) {
-        const state = await loadState();
-        state.lastProactiveMessageTime = Date.now();
-        
-        // 🔥 记录主动推送到对话记忆（添加去重）
-        const conversationMemory = await loadConversationMemory();
-        const timestamp = Date.now();
-        
-        // 检查是否已存在（60秒内相同内容算重复）
-        const exists = conversationMemory.recentMessages.some(m => 
-          m.content === message && 
-          Math.abs((m.timestamp || 0) - timestamp) < 60000
-        );
-        
-        if (!exists) {
-          conversationMemory.recentMessages.push({
-            role: 'assistant',
-            content: message,
-            timestamp: timestamp,
-            source: 'proactive_push',
-            emotion: emotion,
-            type: type
-          });
-          
-          // 按时间排序
-          conversationMemory.recentMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-          
-          // 保留最近 80 条
-          if (conversationMemory.recentMessages.length > 80) {
-            conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-80);
-          }
-          
-          conversationMemory.lastUpdate = timestamp;
-          
-          await saveConversationMemory(conversationMemory);
-          console.log(`💾 [记忆同步] 推送消息已记录: ${message.substring(0, 30)}...`);
-        } else {
-          console.log(`⏭️ [记忆同步] 跳过重复消息`);
-        }
-        await saveState(state);
-        
-        const pushLog = await loadPushLog();
-        pushLog.count++;
-        pushLog.messages.push({
-          time: new Date().toISOString(),
-          message: message,
+      if (!exists) {
+        conversationMemory.recentMessages.push({
+          role: 'assistant',
+          content: message,
+          timestamp: timestamp,
+          source: 'proactive_push',
           emotion: emotion,
-          type: type,
-          score: decision.score,
-          reasons: decision.reasons
+          type: type
         });
-        await savePushLog(pushLog);
         
-        console.log(`💕 主动推送成功 [${pushLog.count}/${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET}] [${type}] ${message.substring(0, 30)}...`);
+        // 按时间排序
+        conversationMemory.recentMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        
+        // 保留最近 80-100 条
+        if (conversationMemory.recentMessages.length > 100) {
+          conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-100);
+        }
+        
+        conversationMemory.lastUpdate = timestamp;
+        await saveConversationMemory(conversationMemory);
+        console.log(`✅ 消息已记录到对话记忆 (共 ${conversationMemory.recentMessages.length} 条)`);
       }
-    } else {
-      console.log(`⏸️ 暂不推送 - ${decision.reason}`);
+      
+      // 更新推送日志
+      const pushLog = await loadPushLog();
+      pushLog.count++;
+      pushLog.messages.push({
+        time: new Date(timestamp).toISOString(),
+        message: message,
+        emotion: emotion,
+        type: type
+      });
+      await savePushLog(pushLog);
+      
+      await saveState(state);
+      
+      console.log(`✅ 主动推送完成 [${type}] (今日第 ${pushLog.count} 条)`);
     }
-    
-  } catch (err) {
-    console.error('❌ 主循环异常:', err.message);
+  } else {
+    console.log(`⏸️  暂不推送: ${decision.reason}`);
   }
 }
 
-// ===== API 端点 =====
+// ===== API 路由 =====
 
-app.get('/', async (req, res) => {
-  const events = await loadEvents();
-  const pushLog = await loadPushLog();
-  const conversationMemory = await loadConversationMemory();
-  
-  res.json({
-    status: 'running',
-    version: '6.4-fixed-bark-url-and-unified-memory',
-    uptime: Math.floor(process.uptime()),
-    events: {
-      recurring: events.recurring.length,
-      yearly: events.yearly.length,
-      monthly: events.monthly.length,
-      onetime: events.onetime.length
-    },
-    push: {
-      today: pushLog.today,
-      count: pushLog.count,
-      target: CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET
-    },
-    memory: {
-      conversationCount: conversationMemory.recentMessages.length,
-      lastUpdate: conversationMemory.lastUpdate
-    },
-    config: {
-      hasBark: !!CONFIG.BARK_KEY,
-      hasDeepseek: !!CONFIG.DEEPSEEK_KEY,
-      checkInterval: CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000 + ' 分钟',
-      minInterval: CONFIG.ULTRA_HONEYMOON_MODE.MIN_INTERVAL / 60000 + ' 分钟'
-    }
-  });
+// 健康检查
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: Date.now() });
 });
 
-// 🔥 新增：获取完整状态（包含对话记忆）
+// 获取状态
 app.get('/api/state', async (req, res) => {
   try {
     const state = await loadState();
-    const conversationMemory = await loadConversationMemory();
-    
-    // 合并对话记忆到状态
-    state.conversationContext = {
-      recentMessages: conversationMemory.recentMessages,
-      lastSyncTime: conversationMemory.lastUpdate
-    };
-    
     res.json(state);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/update-state', async (req, res) => {
+// 更新状态
+app.post('/api/state', async (req, res) => {
   try {
     const state = await loadState();
-    
-    // 🔥 关键：用户聊天不重置 lastProactiveMessageTime
-    if (req.body.lastInteractionTime) state.lastInteractionTime = req.body.lastInteractionTime;
-    if (req.body.mood) state.mood = req.body.mood;
-    if (req.body.energy !== undefined) state.energy = req.body.energy;
-    if (req.body.userAttentionScore !== undefined) state.userAttentionScore = req.body.userAttentionScore;
-    if (req.body.scene) state.scene = req.body.scene;
-    if (req.body.recentMessages) state.recentMessages = req.body.recentMessages;
-    
-    // 记录用户聊天会话（不影响主动推送）
-    if (!state.userChatSessions) state.userChatSessions = [];
-    state.userChatSessions.push({
-      time: Date.now(),
-      messageCount: req.body.recentMessages?.length || 0
-    });
-    state.userChatSessions = state.userChatSessions.slice(-20);
-    
+    Object.assign(state, req.body);
     await saveState(state);
-    console.log('✅ 状态同步成功（不影响主动推送计时）');
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// 🔥 修复：同步游戏对话到 Railway（改进去重逻辑）
+// 获取完整对话记忆
+app.get('/api/conversation', async (req, res) => {
+  try {
+    const memory = await loadConversationMemory();
+    res.json(memory);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔥 游戏同步对话记忆到 Railway
 app.post('/api/sync-conversation', async (req, res) => {
   try {
     const { messages } = req.body;
     
     if (!Array.isArray(messages)) {
-      return res.status(400).json({ error: '消息格式错误' });
+      return res.status(400).json({ error: 'messages 必须是数组' });
     }
     
     const conversationMemory = await loadConversationMemory();
     let addedCount = 0;
     
-    // 合并新消息（改进的去重）
     for (const msg of messages) {
       if (!msg.role || !msg.content) continue;
       
       const timestamp = msg.timestamp || msg.at || Date.now();
       
-      // 检查是否已存在（60秒内相同内容和角色算重复）
+      // 🔥 去重：60秒内相同内容+角色算重复
       const exists = conversationMemory.recentMessages.some(m => 
         m.role === msg.role &&
         m.content === msg.content && 
@@ -1098,111 +1063,119 @@ app.post('/api/sync-conversation', async (req, res) => {
       }
     }
     
-    // 按时间排序
+    // 排序 + 保留最近 100 条
     conversationMemory.recentMessages.sort((a, b) => 
       (a.timestamp || 0) - (b.timestamp || 0)
     );
     
-    // 保留最近 100 条（增加容量）
     if (conversationMemory.recentMessages.length > 100) {
       conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-100);
     }
     
     conversationMemory.lastUpdate = Date.now();
-    
     await saveConversationMemory(conversationMemory);
     
-    console.log(`✅ 游戏对话同步：新增 ${addedCount} 条，总计 ${conversationMemory.recentMessages.length} 条`);
+    console.log(`📥 游戏同步: 新增 ${addedCount} 条消息 (总计 ${conversationMemory.recentMessages.length} 条)`);
     
     res.json({ 
       success: true,
       addedCount: addedCount,
       totalMessages: conversationMemory.recentMessages.length 
     });
-  } catch (err) {
-    console.error('❌ 对话同步失败:', err.message);
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error('❌ 同步失败:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/intelligent-event-detection', async (req, res) => {
+// 🔥 智能事件识别（供游戏调用）
+app.post('/api/detect-event', async (req, res) => {
   try {
-    const { userMessage, conversationHistory } = req.body;
+    const { message, history } = req.body;
     
-    if (!userMessage || typeof userMessage !== 'string') {
-      return res.status(400).json({ error: '缺少 userMessage 参数' });
+    if (!message) {
+      return res.status(400).json({ error: '消息内容不能为空' });
     }
     
-    const detection = await intelligentEventDetection(
-      userMessage,
-      conversationHistory || []
-    );
+    const result = await intelligentEventDetection(message, history || []);
     
-    if (detection.shouldSave) {
-      const saveResult = await executeEventSave(
-        detection.functionName,
-        detection.arguments
-      );
-      res.json({ detected: true, result: saveResult });
+    if (result.shouldSave) {
+      const saveResult = await executeEventSave(result.functionName, result.arguments);
+      res.json({
+        detected: true,
+        ...saveResult
+      });
     } else {
       res.json({ detected: false });
     }
-    
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error('❌ 事件识别失败:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/api/events', async (req, res) => {
-  const events = await loadEvents();
-  res.json(events);
+// 手动触发主动推送
+app.post('/api/push', async (req, res) => {
+  try {
+    await executeProactivePush();
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-app.delete('/api/events/:type/:id', async (req, res) => {
+// 获取推送日志
+app.get('/api/push-log', async (req, res) => {
   try {
-    const { type, id } = req.params;
+    const log = await loadPushLog();
+    res.json(log);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 获取事件列表
+app.get('/api/events', async (req, res) => {
+  try {
     const events = await loadEvents();
-    
-    if (!['recurring', 'yearly', 'monthly', 'onetime'].includes(type)) {
-      return res.status(400).json({ error: '无效的事件类型' });
-    }
-    
-    if (!Array.isArray(events[type])) {
-      return res.status(404).json({ error: '事件类型不存在' });
-    }
-    
-    const initialLength = events[type].length;
-    events[type] = events[type].filter(e => e.id !== id);
-    
-    if (events[type].length === initialLength) {
-      return res.status(404).json({ error: '事件未找到' });
-    }
-    
-    await saveEvents(events);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.json(events);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
 // ===== 启动服务 =====
-(async () => {
+async function startServer() {
   await initStorage();
   
-  // 立即执行一次主循环
-  console.log('🚀 执行首次检查...');
-  await mainLoop();
-  
-  // 设置定时循环（8 分钟一次）
-  setInterval(mainLoop, CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL);
-  console.log(`⏰ 已设置 ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000} 分钟循环检查`);
-  
   app.listen(CONFIG.PORT, () => {
-    console.log(`✅ Railway 后端已启动 v6.4 - 端口 ${CONFIG.PORT}`);
-    console.log(`🔥 超热恋模式：每日目标 ${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET} 条消息`);
-    console.log(`📱 每 ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000} 分钟检查一次`);
-    console.log(`💚 最短推送间隔 ${CONFIG.ULTRA_HONEYMOON_MODE.MIN_INTERVAL / 60000} 分钟`);
-    console.log(`💾 统一记忆系统已启用 (完全互通)`);
-    console.log(`✅ Bark URL 参数修复完成 (不再显示 emotion 名)`);
+    console.log(`🚀 Railway 后端已启动 @ ${CONFIG.PORT}`);
+    console.log(`📅 定时任务：每 ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000} 分钟检查一次`);
   });
-})();
+  
+  // 定时任务：主动推送
+  setInterval(async () => {
+    try {
+      await executeProactivePush();
+    } catch (err) {
+      console.error('❌ 定时推送异常:', err.message);
+    }
+  }, CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL);
+  
+  // 定时任务：事件检查（每小时）
+  setInterval(async () => {
+    try {
+      await checkTodayEvents();
+    } catch (err) {
+      console.error('❌ 事件检查异常:', err.message);
+    }
+  }, 60 * 60 * 1000);
+  
+  // 启动时立即检查一次事件
+  setTimeout(() => checkTodayEvents(), 5000);
+}
+
+startServer().catch(err => {
+  console.error('❌ 服务启动失败:', err);
+  process.exit(1);
+});
