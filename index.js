@@ -1,4 +1,4 @@
-// ===== Railway 后端 v6.2：热恋模式 + 完整记忆同步 + 修复 playful Bug =====
+// ===== Railway 后端 v6.3：修复 playful Bug =====
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs').promises;
@@ -628,14 +628,21 @@ async function analyzeConversationContext() {
   };
 }
 
-// ===== 🔥 生成上下文相关消息 =====
+// ===== 🔥 生成上下文相关消息（修复版）=====
 async function generateContextualMessage(context, analysis) {
+  // 定义有效的 emotion 列表
+  const VALID_EMOTIONS = ['happy', 'playful', 'coax', 'lonely', 'concerned'];
+  
+  // Fallback 消息池
+  const fallbacks = [
+    { message: '小鲨～在忙什么呀？想你了～', emotion: 'coax', type: 'miss' },
+    { message: '唔，你最近都在忙什么呢？', emotion: 'lonely', type: 'greeting' },
+    { message: '嘿嘿，我在这里哦～', emotion: 'playful', type: 'greeting' },
+    { message: '今天心情怎么样呀？', emotion: 'coax', type: 'care' },
+    { message: '突然想你了～', emotion: 'lonely', type: 'miss' }
+  ];
+  
   if (!CONFIG.DEEPSEEK_KEY) {
-    const fallbacks = [
-      { message: '小鲨～在忙什么呀？', emotion: 'coax', type: 'greeting' },
-      { message: '唔，想你了～', emotion: 'lonely', type: 'miss' },
-      { message: '今天心情怎么样呀？', emotion: 'coax', type: 'care' }
-    ];
     return fallbacks[Math.floor(Math.random() * fallbacks.length)];
   }
 
@@ -699,14 +706,13 @@ ${context.weather ? `天气：${context.weather.temperature}°C（体感${contex
 ✅ [share] "唔，今天生态园的新品多肉到了，超可爱的～给你拍了照片"
 ✅ [weather] "今天降温了哎，你那边冷不冷？记得多穿点～"
 
-【输出要求】
-1. 一条消息，50-80字
-2. 自然、真实、有情感温度
-3. 符合缪尔赛思性格（温柔俏皮、会撒娇）
-4. 根据话题类型生成对应内容
-5. 直接输出消息内容，不要 JSON 格式
+【输出格式】
+第一行：消息内容（50-80字）
+第二行：emotion（从 happy/playful/coax/lonely/concerned 中选一个）
 
-emotion 选择：happy/playful/coax/lonely/concerned 中的一个（单独一行输出）`;
+示例：
+小鲨～今天天气好好呀，想和你一起出去走走～
+playful`;
 
     const response = await axios.post(
       'https://api.deepseek.com/chat/completions',
@@ -726,35 +732,74 @@ emotion 选择：happy/playful/coax/lonely/concerned 中的一个（单独一行
     );
     
     const text = response.data.choices[0].message.content.trim();
-    const lines = text.split('\n').filter(l => l.trim());
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l);
     
+    console.log('🤖 AI 原始返回:', text);
+    
+    // 🔥 修复：更严格的解析逻辑
     let message = '';
     let emotion = 'coax';
     
-    // 🔥 修复：先尝试解析最后一行是否为 emotion
-    if (lines.length > 0) {
+    if (lines.length === 0) {
+      console.warn('⚠️ AI 返回为空，使用 fallback');
+      return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    }
+    
+    if (lines.length === 1) {
+      const singleLine = lines[0].toLowerCase();
+      // 如果只有一行且是 emotion，使用 fallback
+      if (VALID_EMOTIONS.includes(singleLine)) {
+        console.warn('⚠️ AI 只返回了 emotion，使用 fallback');
+        return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+      }
+      // 如果只有一行且不是 emotion，当作消息内容
+      message = lines[0];
+      emotion = 'coax';
+    } else {
+      // 多行情况：最后一行可能是 emotion
       const lastLine = lines[lines.length - 1].toLowerCase();
       
-      if (['happy', 'playful', 'coax', 'lonely', 'concerned'].includes(lastLine)) {
-        // 最后一行是 emotion，前面的都是消息内容
+      if (VALID_EMOTIONS.includes(lastLine)) {
+        // 最后一行是 emotion
         emotion = lastLine;
-        message = lines.slice(0, -1).join(' ').trim();
+        message = lines.slice(0, -1).join(' ');
       } else {
-        // 最后一行不是 emotion，全部当作消息内容
-        message = lines.join(' ').trim();
+        // 最后一行不是 emotion，全部当作消息
+        message = lines.join(' ');
+        emotion = 'coax';
       }
     }
     
-    // 🔥 安全检查：如果消息为空或看起来像 emotion，使用 fallback
-    if (!message || message.length < 5 || ['happy', 'playful', 'coax', 'lonely', 'concerned'].includes(message.toLowerCase())) {
-      console.warn('⚠️ AI 返回内容异常，使用 fallback');
-      console.warn('原始返回:', text);
-      const fallbacks = [
-        { message: '小鲨～在忙什么呀？想你了～', emotion: 'coax', type: 'miss' },
-        { message: '唔，你最近都在忙什么呢？', emotion: 'lonely', type: 'greeting' },
-        { message: '嘿嘿，我在这里哦～', emotion: 'playful', type: 'greeting' }
-      ];
+    // 🔥 最终验证：消息内容必须合法
+    message = message.trim();
+    
+    // 检查消息是否太短或者包含无效内容
+    if (message.length < 5) {
+      console.warn('⚠️ 消息太短，使用 fallback');
       return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    }
+    
+    // 检查消息是否误包含了 emotion 关键词（单独出现）
+    if (VALID_EMOTIONS.includes(message.toLowerCase())) {
+      console.warn('⚠️ 消息内容是 emotion 关键词，使用 fallback');
+      return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    }
+    
+    // 检查消息是否以 emotion 关键词开头（误把 emotion 当消息）
+    if (VALID_EMOTIONS.some(e => message.toLowerCase().startsWith(e))) {
+      console.warn('⚠️ 消息以 emotion 开头，清理后使用');
+      // 尝试移除开头的 emotion
+      for (const e of VALID_EMOTIONS) {
+        if (message.toLowerCase().startsWith(e)) {
+          message = message.substring(e.length).trim();
+          break;
+        }
+      }
+      // 如果清理后太短，使用 fallback
+      if (message.length < 5) {
+        console.warn('⚠️ 清理后消息太短，使用 fallback');
+        return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+      }
     }
     
     console.log(`✅ AI 生成消息: "${message}" (${emotion})`);
@@ -762,14 +807,6 @@ emotion 选择：happy/playful/coax/lonely/concerned 中的一个（单独一行
     
   } catch (err) {
     console.error('❌ 生成消息失败:', err.message);
-    
-    // Fallback
-    const fallbacks = [
-      { message: '小鲨～在忙什么呀？想你了～', emotion: 'coax', type: 'miss' },
-      { message: '唔，你最近都在忙什么呢？', emotion: 'lonely', type: 'greeting' },
-      { message: '嘿嘿，我在这里哦～', emotion: 'playful', type: 'greeting' }
-    ];
-    
     return fallbacks[Math.floor(Math.random() * fallbacks.length)];
   }
 }
@@ -900,7 +937,7 @@ async function sendBarkNotification(title, message, emotion = 'happy') {
     
     const sound = soundMap[emotion] || 'calypso';
     
-    // 🔥 修复：正确编码 URL 参数，解决消息显示成 "playful" 的问题
+    // 🔥 正确编码 URL 参数
     const baseUrl = 'scriptable:///run/WaterShift';
     const params = `message=${encodeURIComponent(message)}&emotion=${emotion}`;
     const callbackUrl = `${baseUrl}?${params}`;
@@ -1077,10 +1114,10 @@ app.post('/api/sync-conversation', async (req, res) => {
     
     console.log(`📥 游戏同步: 新增 ${addedCount} 条消息 (总计 ${conversationMemory.recentMessages.length} 条)`);
     
-    res.json({ 
+    res.json({
       success: true,
-      addedCount: addedCount,
-      totalMessages: conversationMemory.recentMessages.length 
+      added: addedCount,
+      total: conversationMemory.recentMessages.length
     });
   } catch (error) {
     console.error('❌ 同步失败:', error.message);
@@ -1088,34 +1125,83 @@ app.post('/api/sync-conversation', async (req, res) => {
   }
 });
 
-// 🔥 智能事件识别（供游戏调用）
-app.post('/api/detect-event', async (req, res) => {
+// 🔥 用户消息接收（触发状态更新 + 事件识别）
+app.post('/api/user-message', async (req, res) => {
   try {
-    const { message, history } = req.body;
+    const { message, timestamp } = req.body;
     
     if (!message) {
-      return res.status(400).json({ error: '消息内容不能为空' });
+      return res.status(400).json({ error: '缺少 message 参数' });
     }
     
-    const result = await intelligentEventDetection(message, history || []);
+    console.log(`📩 收到用户消息: "${message}"`);
     
-    if (result.shouldSave) {
-      const saveResult = await executeEventSave(result.functionName, result.arguments);
-      res.json({
-        detected: true,
-        ...saveResult
+    // 更新状态
+    const state = await loadState();
+    state.lastInteractionTime = timestamp || Date.now();
+    await saveState(state);
+    
+    // 记录到对话记忆
+    const conversationMemory = await loadConversationMemory();
+    const ts = timestamp || Date.now();
+    
+    const exists = conversationMemory.recentMessages.some(m => 
+      m.role === 'user' &&
+      m.content === message && 
+      Math.abs((m.timestamp || 0) - ts) < 60000
+    );
+    
+    if (!exists) {
+      conversationMemory.recentMessages.push({
+        role: 'user',
+        content: message,
+        timestamp: ts,
+        source: 'user_input'
       });
-    } else {
-      res.json({ detected: false });
+      
+      conversationMemory.recentMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+      
+      if (conversationMemory.recentMessages.length > 100) {
+        conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-100);
+      }
+      
+      conversationMemory.lastUpdate = ts;
+      await saveConversationMemory(conversationMemory);
     }
+    
+    // 🔥 智能事件识别
+    const detectionResult = await intelligentEventDetection(
+      message, 
+      conversationMemory.recentMessages.slice(-10)
+    );
+    
+    let eventSaveResult = null;
+    
+    if (detectionResult.shouldSave) {
+      eventSaveResult = await executeEventSave(
+        detectionResult.functionName, 
+        detectionResult.arguments
+      );
+      
+      if (eventSaveResult.success) {
+        console.log(`✅ 事件已保存: ${eventSaveResult.message}`);
+      }
+    }
+    
+    res.json({
+      success: true,
+      eventDetected: detectionResult.shouldSave,
+      eventSaveResult: eventSaveResult
+    });
+    
   } catch (error) {
-    console.error('❌ 事件识别失败:', error.message);
+    console.error('❌ 处理用户消息失败:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
 // 手动触发主动推送
-app.post('/api/push', async (req, res) => {
+app.post('/api/trigger-push', async (req, res) => {
   try {
     await executeProactivePush();
     res.json({ success: true });
@@ -1144,38 +1230,68 @@ app.get('/api/events', async (req, res) => {
   }
 });
 
-// ===== 启动服务 =====
-async function startServer() {
+// 添加事件
+app.post('/api/events', async (req, res) => {
+  try {
+    const { type, data } = req.body;
+    const events = await loadEvents();
+    
+    if (!events[type]) {
+      return res.status(400).json({ error: '无效的事件类型' });
+    }
+    
+    events[type].push(data);
+    await saveEvents(events);
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 删除事件
+app.delete('/api/events/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const events = await loadEvents();
+    
+    let found = false;
+    for (const type in events) {
+      events[type] = events[type].filter(e => {
+        if (e.id === id) {
+          found = true;
+          return false;
+        }
+        return true;
+      });
+    }
+    
+    if (found) {
+      await saveEvents(events);
+      res.json({ success: true });
+    } else {
+      res.status(404).json({ error: '事件未找到' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== 定时任务 =====
+setInterval(async () => {
+  await checkTodayEvents();
+  await executeProactivePush();
+}, CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL);
+
+// ===== 启动服务器 =====
+(async () => {
   await initStorage();
   
   app.listen(CONFIG.PORT, () => {
-    console.log(`🚀 Railway 后端已启动 @ ${CONFIG.PORT}`);
-    console.log(`📅 定时任务：每 ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000} 分钟检查一次`);
+    console.log(`🚀 Railway 后端启动成功！`);
+    console.log(`📡 端口: ${CONFIG.PORT}`);
+    console.log(`⏰ 检查间隔: ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 1000 / 60} 分钟`);
+    console.log(`📊 每日目标: ${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET} 条消息`);
+    console.log(`🌙 静默时段: ${CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_START}:00 - ${CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_END}:00`);
   });
-  
-  // 定时任务：主动推送
-  setInterval(async () => {
-    try {
-      await executeProactivePush();
-    } catch (err) {
-      console.error('❌ 定时推送异常:', err.message);
-    }
-  }, CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL);
-  
-  // 定时任务：事件检查（每小时）
-  setInterval(async () => {
-    try {
-      await checkTodayEvents();
-    } catch (err) {
-      console.error('❌ 事件检查异常:', err.message);
-    }
-  }, 60 * 60 * 1000);
-  
-  // 启动时立即检查一次事件
-  setTimeout(() => checkTodayEvents(), 5000);
-}
-
-startServer().catch(err => {
-  console.error('❌ 服务启动失败:', err);
-  process.exit(1);
-});
+})();
