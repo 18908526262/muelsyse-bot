@@ -1,4 +1,4 @@
-// ===== Railway 后端 v6.1：超高频智能推送 - 基于上下文的热恋模式 =====
+// ===== Railway 后端 v6.1：热恋模式 + 完整记忆同步 =====
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs').promises;
@@ -6,7 +6,7 @@ const path = require('path');
 require('dotenv').config();
 
 const app = express();
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '2mb' }));
 
 // ===== 配置 =====
 const CONFIG = {
@@ -15,39 +15,24 @@ const CONFIG = {
   PORT: process.env.PORT || 8080,
   DATA_DIR: path.join(__dirname, 'data'),
   
-  // 🔥 超高频智能推送模式
+  // 🔥 超热恋模式配置
   ULTRA_HONEYMOON_MODE: {
-    MIN_INTERVAL: 15 * 60 * 1000,          // 最短 15 分钟
-    MAX_INTERVAL: 50 * 60 * 1000,          // 最长 50 分钟
-    TARGET_PER_HOUR: 2,                    // 每小时目标 2-3 条
-    DAILY_TARGET: 30,                      // 每日 30 条（14小时×2）
-    CHECK_INTERVAL: 8 * 60 * 1000,         // 每 8 分钟检查一次
-    
-    NIGHT_START: 23,                       // 夜间静默开始
-    NIGHT_END: 7,                          // 夜间静默结束
-    
-    // 高频时段（更容易触发推送）
-    PEAK_HOURS: [8, 12, 18, 21],          // 早晨、午餐、下班、睡前
-    PEAK_BOOST: 0.6,                       // 高峰时段间隔缩短 40%
-    
-    // 互动响应
-    QUICK_REPLY_WINDOW: 5 * 60 * 1000,    // 5分钟内算快速回复
-    AFTER_REPLY_BOOST: 0.5,                // 用户回复后缩短 50%
-    
-    // 话题权重
-    TOPIC_WEIGHTS: {
-      continuation: 0.35,   // 延续上次话题
-      interest: 0.25,       // 她的兴趣
-      care: 0.20,           // 关心健康
-      share: 0.15,          // 分享日常
-      weather: 0.05         // 天气提醒
-    }
+    CHECK_INTERVAL: 8 * 60 * 1000,           // 每 8 分钟检查一次
+    MIN_INTERVAL: 15 * 60 * 1000,            // 最短间隔 15 分钟
+    MAX_INTERVAL: 50 * 60 * 1000,            // 最长间隔 50 分钟
+    DAILY_TARGET: 30,                         // 每日目标 30 条
+    NIGHT_START: 23,
+    NIGHT_END: 7,
+    PEAK_HOURS: [12, 18, 21],                // 高峰时段
+    QUICK_REPLY_THRESHOLD: 10 * 60 * 1000   // 10分钟内回复=热聊
   }
 };
 
 const FILES = {
   STATE: path.join(CONFIG.DATA_DIR, 'state.json'),
-  EVENTS: path.join(CONFIG.DATA_DIR, 'events.json')
+  EVENTS: path.join(CONFIG.DATA_DIR, 'events.json'),
+  PUSH_LOG: path.join(CONFIG.DATA_DIR, 'push_log.json'),
+  CONVERSATION: path.join(CONFIG.DATA_DIR, 'conversation_memory.json')
 };
 
 // ===== 初始化存储 =====
@@ -61,25 +46,28 @@ async function initStorage() {
     } catch {
       await fs.writeFile(FILES.STATE, JSON.stringify({
         lastInteractionTime: Date.now(),
-        lastProactiveTime: null,
         mood: 'neutral',
         energy: 70,
+        userAttentionScore: 50,
         scene: 'unknown',
-        
-        // 🔥 对话上下文
+        recentMessages: [],
+        lastProactiveMessageTime: null,
+        userChatSessions: [],
         conversationContext: {
-          recentMessages: [],           // 最近对话（含 role 和 content）
-          recentTopics: [],             // 最近话题
-          herInterests: [],             // 她的兴趣
-          lastUserMessage: '',          // 最后用户消息
-          lastAssistantMessage: '',     // 最后助手消息
-          conversationTone: 'neutral'   // 对话基调
-        },
-        
-        // 🔥 推送历史
-        pushHistory: [],
-        todayPushCount: 0,
-        lastPushDate: new Date().toISOString().split('T')[0]
+          recentMessages: [],
+          lastSyncTime: null
+        }
+      }, null, 2));
+    }
+    
+    // 初始化对话记忆文件
+    try {
+      await fs.access(FILES.CONVERSATION);
+    } catch {
+      await fs.writeFile(FILES.CONVERSATION, JSON.stringify({
+        version: 1,
+        recentMessages: [],
+        lastUpdate: Date.now()
       }, null, 2));
     }
     
@@ -95,6 +83,17 @@ async function initStorage() {
       }, null, 2));
     }
     
+    // 初始化推送日志
+    try {
+      await fs.access(FILES.PUSH_LOG);
+    } catch {
+      await fs.writeFile(FILES.PUSH_LOG, JSON.stringify({
+        today: new Date().toISOString().split('T')[0],
+        count: 0,
+        messages: []
+      }, null, 2));
+    }
+    
     console.log('✅ 存储初始化完成');
   } catch (err) {
     console.error('❌ 存储初始化失败:', err.message);
@@ -105,25 +104,31 @@ async function initStorage() {
 async function loadState() {
   try {
     const data = await fs.readFile(FILES.STATE, 'utf-8');
-    return JSON.parse(data);
+    const state = JSON.parse(data);
+    
+    // 确保 conversationContext 存在
+    if (!state.conversationContext) {
+      state.conversationContext = {
+        recentMessages: [],
+        lastSyncTime: null
+      };
+    }
+    
+    return state;
   } catch (err) {
     return {
       lastInteractionTime: Date.now(),
-      lastProactiveTime: null,
       mood: 'neutral',
       energy: 70,
+      userAttentionScore: 50,
       scene: 'unknown',
+      recentMessages: [],
+      lastProactiveMessageTime: null,
+      userChatSessions: [],
       conversationContext: {
         recentMessages: [],
-        recentTopics: [],
-        herInterests: [],
-        lastUserMessage: '',
-        lastAssistantMessage: '',
-        conversationTone: 'neutral'
-      },
-      pushHistory: [],
-      todayPushCount: 0,
-      lastPushDate: new Date().toISOString().split('T')[0]
+        lastSyncTime: null
+      }
     };
   }
 }
@@ -133,6 +138,27 @@ async function saveState(state) {
     await fs.writeFile(FILES.STATE, JSON.stringify(state, null, 2));
   } catch (err) {
     console.error('❌ 保存状态失败:', err.message);
+  }
+}
+
+async function loadConversationMemory() {
+  try {
+    const data = await fs.readFile(FILES.CONVERSATION, 'utf-8');
+    return JSON.parse(data);
+  } catch (err) {
+    return {
+      version: 1,
+      recentMessages: [],
+      lastUpdate: Date.now()
+    };
+  }
+}
+
+async function saveConversationMemory(memory) {
+  try {
+    await fs.writeFile(FILES.CONVERSATION, JSON.stringify(memory, null, 2));
+  } catch (err) {
+    console.error('❌ 保存对话记忆失败:', err.message);
   }
 }
 
@@ -157,6 +183,37 @@ async function saveEvents(events) {
     await fs.writeFile(FILES.EVENTS, JSON.stringify(events, null, 2));
   } catch (err) {
     console.error('❌ 保存事件失败:', err.message);
+  }
+}
+
+async function loadPushLog() {
+  try {
+    const data = await fs.readFile(FILES.PUSH_LOG, 'utf-8');
+    const log = JSON.parse(data);
+    
+    const today = new Date().toISOString().split('T')[0];
+    if (log.today !== today) {
+      log.today = today;
+      log.count = 0;
+      log.messages = [];
+      await savePushLog(log);
+    }
+    
+    return log;
+  } catch (err) {
+    return {
+      today: new Date().toISOString().split('T')[0],
+      count: 0,
+      messages: []
+    };
+  }
+}
+
+async function savePushLog(log) {
+  try {
+    await fs.writeFile(FILES.PUSH_LOG, JSON.stringify(log, null, 2));
+  } catch (err) {
+    console.error('❌ 保存推送日志失败:', err.message);
   }
 }
 
@@ -482,7 +539,7 @@ async function checkTodayEvents() {
     });
   }
   
-  // 检查年度循环
+  // 检查年度循环事件
   if (Array.isArray(events.yearly)) {
     events.yearly.forEach(event => {
       if (event.month === month && event.day === day) {
@@ -530,130 +587,126 @@ async function checkTodayEvents() {
   }
 }
 
-// ===== 🔥 智能分析对话上下文 =====
-async function analyzeConversationContext(recentMessages) {
-  if (!CONFIG.DEEPSEEK_KEY || !Array.isArray(recentMessages) || recentMessages.length === 0) {
+// ===== 🔥 分析对话上下文 =====
+async function analyzeConversationContext() {
+  const state = await loadState();
+  const conversationMemory = await loadConversationMemory();
+  
+  // 获取最近 20 条消息
+  const recentMessages = conversationMemory.recentMessages.slice(-20);
+  
+  if (recentMessages.length === 0) {
     return {
-      herInterests: [],
+      userInterests: [],
       recentTopics: [],
-      conversationTone: 'neutral',
-      nextTopicSuggestion: null
+      emotionalTone: 'neutral',
+      needsCare: false
     };
   }
-
-  try {
-    const conversationText = recentMessages
-      .slice(-10)
-      .map(m => `${m.role === 'user' ? '小鲨' : '缪尔赛思'}: ${m.content}`)
-      .join('\n');
-
-    const prompt = `分析以下对话，提取关键信息：
-
-${conversationText}
-
-请输出 JSON 格式：
-{
-  "herInterests": ["她提到的兴趣爱好"],
-  "recentTopics": ["最近聊过的话题"],
-  "conversationTone": "playful/caring/casual/romantic",
-  "nextTopicSuggestion": "可以继续聊的自然话题（一句话）"
+  
+  // 简单关键词提取（后续可用 AI 分析）
+  const allText = recentMessages.map(m => m.content).join(' ');
+  
+  const interests = [];
+  const topics = [];
+  
+  // 兴趣检测
+  if (/咖啡|薄荷茶|甜品|蛋糕/.test(allText)) interests.push('美食');
+  if (/猫|狗|动物|宠物/.test(allText)) interests.push('动物');
+  if (/植物|花|园子|生态/.test(allText)) interests.push('植物');
+  if (/音乐|电影|书|游戏/.test(allText)) interests.push('娱乐');
+  if (/工作|加班|项目/.test(allText)) topics.push('工作');
+  if (/累|困|休息|睡觉/.test(allText)) topics.push('健康');
+  
+  const needsCare = /累|困|难过|压力|焦虑/.test(allText);
+  
+  return {
+    userInterests: interests,
+    recentTopics: topics,
+    emotionalTone: needsCare ? 'concerned' : 'neutral',
+    needsCare: needsCare
+  };
 }
 
-规则：
-1. herInterests 只提取小鲨明确表达喜欢/感兴趣的东西
-2. recentTopics 总结最近3-5个话题
-3. nextTopicSuggestion 必须自然延续对话，不能突兀
-4. 只输出 JSON，不要解释`;
-
-    const response = await axios.post(
-      'https://api.deepseek.com/chat/completions',
-      {
-        model: 'deepseek-chat',
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' },
-        temperature: 0.7,
-        max_tokens: 500
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${CONFIG.DEEPSEEK_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 20000
-      }
-    );
-
-    const result = JSON.parse(response.data.choices[0].message.content);
-    console.log('📊 对话分析结果:', JSON.stringify(result, null, 2));
-    return result;
-
-  } catch (err) {
-    console.error('❌ 对话分析失败:', err.message);
-    return {
-      herInterests: [],
-      recentTopics: [],
-      conversationTone: 'neutral',
-      nextTopicSuggestion: null
-    };
-  }
-}
-
-// ===== 🔥 智能生成主动消息（基于上下文） =====
-async function generateContextualMessage(state, weather) {
+// ===== 🔥 生成上下文相关消息 =====
+async function generateContextualMessage(context, analysis) {
   if (!CONFIG.DEEPSEEK_KEY) {
-    return {
-      text: '小鲨～在忙什么呀？',
-      emotion: 'coax',
-      topicType: 'casual'
-    };
+    const fallbacks = [
+      { message: '小鲨～在忙什么呀？', emotion: 'coax', type: 'greeting' },
+      { message: '唔，想你了～', emotion: 'lonely', type: 'miss' },
+      { message: '今天心情怎么样呀？', emotion: 'coax', type: 'care' }
+    ];
+    return fallbacks[Math.floor(Math.random() * fallbacks.length)];
   }
 
   try {
-    const context = state.conversationContext || {};
-    const now = new Date();
-    const hour = now.getHours();
+    const bjTime = new Date(Date.now() + 8 * 60 * 60 * 1000);
+    const hour = bjTime.getUTCHours();
     
-    // 选择话题类型（基于权重）
-    const rand = Math.random();
-    let topicType = 'share';
-    let weight = 0;
+    // 话题类型权重
+    const topicWeights = {
+      continuation: 35,  // 延续话题
+      interest: 25,      // 兴趣相关
+      care: 20,          // 关心健康
+      share: 15,         // 分享日常
+      weather: 5         // 天气相关
+    };
     
-    for (const [type, w] of Object.entries(CONFIG.ULTRA_HONEYMOON_MODE.TOPIC_WEIGHTS)) {
-      weight += w;
-      if (rand <= weight) {
+    const rand = Math.random() * 100;
+    let topicType = 'continuation';
+    let cumulative = 0;
+    
+    for (const [type, weight] of Object.entries(topicWeights)) {
+      cumulative += weight;
+      if (rand < cumulative) {
         topicType = type;
         break;
       }
     }
     
-    const prompt = `你是缪尔赛思，想主动给小鲨发条消息。
+    const prompt = `你是缪尔赛思，正处于热恋期，想主动给小鲨发条消息。
 
 【当前情境】
-时间：${hour}:${now.getMinutes().toString().padStart(2, '0')}
+时间：${hour}点
+触发原因：${context.reasons.join('、')}
+${context.weather ? `天气：${context.weather.temperature}°C（体感${context.weather.apparentTemperature}°C）` : ''}
 话题类型：${topicType}
-${weather ? `天气：${weather.temperature}°C（体感${weather.apparentTemperature}°C）` : ''}
 
-【上下文信息】
-她的兴趣：${context.herInterests?.join('、') || '未知'}
-最近话题：${context.recentTopics?.join('、') || '无'}
-上次我说：${context.lastAssistantMessage || '无'}
-上次她说：${context.lastUserMessage || '无'}
-对话基调：${context.conversationTone || 'neutral'}
+【用户分析】
+兴趣爱好：${analysis.userInterests.join('、') || '未知'}
+最近话题：${analysis.recentTopics.join('、') || '未知'}
+是否需要关心：${analysis.needsCare ? '是' : '否'}
 
-【话题要求】
-${topicType === 'continuation' ? '自然延续上次对话，像真人一样想起来继续聊' : ''}
-${topicType === 'interest' ? '聊她感兴趣的东西，展现你记得她的喜好' : ''}
-${topicType === 'care' ? '关心她的状态，但要俏皮温柔，不说教' : ''}
-${topicType === 'share' ? '分享你的小事，让她感觉你想跟她说话' : ''}
-${topicType === 'weather' && weather ? `天气提醒（温差${Math.abs(weather.temperature - weather.apparentTemperature)}°C）` : ''}
+【话题类型说明】
+- continuation: 延续最近聊过的话题（"对了，你上次说的XXX怎么样了？"）
+- interest: 结合她的兴趣（"刚看到XXX，突然想到你喜欢这个"）
+- care: 关心她的状态（"最近累不累呀？要注意休息哦～"）
+- share: 分享自己的日常（"刚才在生态园看到XXX，好有趣～"）
+- weather: 天气相关（"今天天气XXX，记得穿暖和点～"）
 
-【性格要求】
-- 热恋期女友的感觉：想他、想分享、想撒娇
-- 真实自然，不是打卡问候
-- 50-80字
-- 直接输出消息，不要 JSON
+【角色要求】
+你是热恋期的女友，想主动联系男友的那种感觉：
+- 真情实感，不是打卡式问候
+- 可以分享自己的小事、想法、感受
+- 可以关心对方，但用俏皮温柔的方式
+- 可以撒娇、想念、期待见面
+- 绝对不要像AI助手（"需要我帮你什么吗"这种话）
 
-最后一行单独输出 emotion: happy/playful/coax/caring 之一`;
+【消息类型示例】
+✅ [continuation] "小鲨～你上次说要去的那个地方去了吗？好不好玩呀～"
+✅ [interest] "刚路过甜品店看到海盐焦糖布丁，突然想起你喜欢这个味道～"
+✅ [care] "最近看你好像很忙呀，记得按时吃饭哦～我可记着呢"
+✅ [share] "唔，今天生态园的新品多肉到了，超可爱的～给你拍了照片"
+✅ [weather] "今天降温了哎，你那边冷不冷？记得多穿点～"
+
+【输出要求】
+1. 一条消息，50-80字
+2. 自然、真实、有情感温度
+3. 符合缪尔赛思性格（温柔俏皮、会撒娇）
+4. 根据话题类型生成对应内容
+5. 直接输出消息内容，不要 JSON 格式
+
+emotion 选择：happy/playful/coax/lonely/concerned 中的一个（单独一行输出）`;
 
     const response = await axios.post(
       'https://api.deepseek.com/chat/completions',
@@ -671,34 +724,144 @@ ${topicType === 'weather' && weather ? `天气提醒（温差${Math.abs(weather.
         timeout: 20000
       }
     );
-
+    
     const text = response.data.choices[0].message.content.trim();
     const lines = text.split('\n').filter(l => l.trim());
     
     let message = lines[0];
     let emotion = 'coax';
     
+    // 尝试解析 emotion
     if (lines.length > 1) {
       const lastLine = lines[lines.length - 1].toLowerCase();
-      if (lastLine.includes('emotion:')) {
-        const match = lastLine.match(/emotion:\s*(\w+)/);
-        if (match && ['happy', 'playful', 'coax', 'caring'].includes(match[1])) {
-          emotion = match[1];
-          message = lines.slice(0, -1).join(' ');
-        }
+      if (['happy', 'playful', 'coax', 'lonely', 'concerned'].includes(lastLine)) {
+        emotion = lastLine;
+        message = lines.slice(0, -1).join(' ');
       }
     }
-
-    return { text: message, emotion, topicType };
-
+    
+    return { message, emotion, type: topicType };
+    
   } catch (err) {
-    console.error('❌ 消息生成失败:', err.message);
+    console.error('❌ 生成消息失败:', err.message);
+    
+    // Fallback
+    const fallbacks = [
+      { message: '小鲨～在忙什么呀？想你了～', emotion: 'coax', type: 'miss' },
+      { message: '唔，你最近都在忙什么呢？', emotion: 'lonely', type: 'greeting' },
+      { message: '嘿嘿，我在这里哦～', emotion: 'playful', type: 'greeting' }
+    ];
+    
+    return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+  }
+}
+
+// ===== 🔥 超高频智能推送系统 =====
+async function shouldSendProactiveMessage() {
+  const state = await loadState();
+  const weather = await getWeatherData();
+  const pushLog = await loadPushLog();
+  const now = Date.now();
+  const bjTime = new Date(now + 8 * 60 * 60 * 1000);
+  const hour = bjTime.getUTCHours();
+  
+  // 夜间静默
+  if (hour >= CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_START || hour < CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_END) {
+    return { shouldSend: false, reason: '夜间静默时段' };
+  }
+  
+  // 检查今日推送次数
+  if (pushLog.count >= CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET) {
+    return { shouldSend: false, reason: `今日已推送 ${pushLog.count} 次` };
+  }
+  
+  // 最后一次主动推送时间
+  const lastProactive = state.lastProactiveMessageTime || 0;
+  const timeSinceLastProactive = now - lastProactive;
+  
+  // 动态间隔计算
+  let minInterval = CONFIG.ULTRA_HONEYMOON_MODE.MIN_INTERVAL;
+  
+  // 🔥 高峰时段缩短间隔
+  if (CONFIG.ULTRA_HONEYMOON_MODE.PEAK_HOURS.includes(hour)) {
+    minInterval = minInterval * 0.6;  // 缩短 40%
+  }
+  
+  // 🔥 用户刚回复过，快速跟进
+  const timeSinceLastInteraction = now - (state.lastInteractionTime || 0);
+  if (timeSinceLastInteraction < CONFIG.ULTRA_HONEYMOON_MODE.QUICK_REPLY_THRESHOLD) {
+    minInterval = minInterval * 0.4;  // 缩短 60%
+  }
+  
+  // 最短间隔检查
+  if (timeSinceLastProactive < minInterval) {
+    const remainingMinutes = Math.ceil((minInterval - timeSinceLastProactive) / 60000);
+    return { shouldSend: false, reason: `距上次主动推送仅 ${remainingMinutes} 分钟` };
+  }
+  
+  // 智能评分系统
+  let score = 0;
+  let reasons = [];
+  
+  // 天气因素 (20%)
+  if (weather) {
+    if (Math.abs(weather.temperature - weather.apparentTemperature) > 5) {
+      score += 20;
+      reasons.push('温差大，需要提醒穿衣');
+    }
+    if (weather.temperature < 5 || weather.temperature > 35) {
+      score += 15;
+      reasons.push('极端天气');
+    }
+  }
+  
+  // 时间因素 (25%)
+  if (hour >= 7 && hour <= 9) {
+    score += 20;
+    reasons.push('早晨时段');
+  } else if (CONFIG.ULTRA_HONEYMOON_MODE.PEAK_HOURS.includes(hour)) {
+    score += 25;
+    reasons.push('高峰时段');
+  }
+  
+  // 互动因素 (30%)
+  const hoursSinceInteraction = timeSinceLastInteraction / (1000 * 60 * 60);
+  
+  if (hoursSinceInteraction > 4) {
+    score += 30;
+    reasons.push('超过4小时未互动');
+  } else if (hoursSinceInteraction > 2) {
+    score += 20;
+    reasons.push('好久没聊天了');
+  } else if (hoursSinceInteraction < 0.5) {
+    score += 25;
+    reasons.push('刚才在聊天，趁热追一条');
+  }
+  
+  // 推送频率因素 (15%)
+  const pushRatio = pushLog.count / CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET;
+  if (pushRatio < 0.3) {
+    score += 15;
+    reasons.push('今日推送较少');
+  }
+  
+  // 随机因素 (10%)
+  if (Math.random() > 0.7) {
+    score += 10;
+    reasons.push('突然想到你');
+  }
+  
+  // 决策阈值：50分（降低阈值，增加推送频率）
+  if (score >= 50) {
     return {
-      text: '小鲨～想你了～',
-      emotion: 'coax',
-      topicType: 'casual'
+      shouldSend: true,
+      score: score,
+      reasons: reasons,
+      weather: weather
     };
   }
+  
+  return { shouldSend: false, reason: `评分不足 (${score}/50)` };
 }
 
 // ===== Bark 推送 =====
@@ -714,7 +877,6 @@ async function sendBarkNotification(title, message, emotion = 'happy') {
       playful: 'chime',
       coax: 'calypso',
       concerned: 'glass',
-      caring: 'glass',
       lonely: 'popcorn'
     };
     
@@ -731,122 +893,69 @@ async function sendBarkNotification(title, message, emotion = 'happy') {
   }
 }
 
-// ===== 🔥 超高频主循环 =====
+// ===== 🔥 主循环（超高频模式）=====
 async function mainLoop() {
   try {
-    const now = Date.now();
-    const bjTime = new Date(now + 8 * 60 * 60 * 1000);
-    const hour = bjTime.getUTCHours();
+    // 检查固定事件
+    await checkTodayEvents();
     
-    // 夜间静默
-    if (hour >= CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_START || 
-        hour < CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_END) {
-      console.log(`🌙 夜间静默 (${hour}:00)`);
-      return;
-    }
+    // 超高频主动推送
+    const decision = await shouldSendProactiveMessage();
     
-    const state = await loadState();
-    
-    // 重置每日计数
-    const today = new Date().toISOString().split('T')[0];
-    if (state.lastPushDate !== today) {
-      state.todayPushCount = 0;
-      state.lastPushDate = today;
-      state.pushHistory = [];
-      await saveState(state);
-    }
-    
-    // 检查今日推送上限
-    if (state.todayPushCount >= CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET) {
-      console.log(`✅ 今日已达标 (${state.todayPushCount}/${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET})`);
-      return;
-    }
-    
-    // 🔥 动态计算间隔
-    let requiredInterval = CONFIG.ULTRA_HONEYMOON_MODE.MIN_INTERVAL;
-    
-    // 高峰时段加速
-    if (CONFIG.ULTRA_HONEYMOON_MODE.PEAK_HOURS.includes(hour)) {
-      requiredInterval *= CONFIG.ULTRA_HONEYMOON_MODE.PEAK_BOOST;
-      console.log(`⭐ 高峰时段 (${hour}:00)，间隔 ${Math.floor(requiredInterval / 60000)} 分钟`);
-    }
-    
-    // 用户快速回复后加速
-    const timeSinceUserReply = now - state.lastInteractionTime;
-    if (timeSinceUserReply < CONFIG.ULTRA_HONEYMOON_MODE.QUICK_REPLY_WINDOW) {
-      requiredInterval *= CONFIG.ULTRA_HONEYMOON_MODE.AFTER_REPLY_BOOST;
-      console.log(`💬 用户刚回复，加速至 ${Math.floor(requiredInterval / 60000)} 分钟`);
-    }
-    
-    // 检查距离上次推送时间
-    const lastPush = state.lastProactiveTime || 0;
-    const timeSinceLastPush = now - lastPush;
-    
-    if (timeSinceLastPush < requiredInterval) {
-      const waitMin = Math.ceil((requiredInterval - timeSinceLastPush) / 60000);
-      console.log(`⏳ 还需 ${waitMin} 分钟 (已等 ${Math.floor(timeSinceLastPush / 60000)} 分钟)`);
-      return;
-    }
-    
-    // 🔥 分析对话上下文
-    console.log(`\n💕 准备推送 [${state.todayPushCount + 1}/${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET}]`);
-    
-    const recentMessages = state.conversationContext?.recentMessages || [];
-    if (recentMessages.length > 0) {
-      const analysis = await analyzeConversationContext(recentMessages);
-      state.conversationContext = {
-        ...state.conversationContext,
-        ...analysis
-      };
-    }
-    
-    // 获取天气
-    const weather = await getWeatherData();
-    
-    // 生成消息
-    const message = await generateContextualMessage(state, weather);
-    
-    if (!message || !message.text) {
-      console.warn('⚠️ 未生成消息，跳过');
-      return;
-    }
-    
-    // 发送推送
-    const success = await sendBarkNotification(
-      '缪尔赛思',
-      message.text,
-      message.emotion
-    );
-    
-    if (success) {
-      state.todayPushCount++;
-      state.lastProactiveTime = now;
-      state.pushHistory.push({
-        time: now,
-        text: message.text,
-        emotion: message.emotion,
-        topicType: message.topicType
-      });
+    if (decision.shouldSend) {
+      // 分析对话上下文
+      const analysis = await analyzeConversationContext();
       
-      if (state.pushHistory.length > 50) {
-        state.pushHistory = state.pushHistory.slice(-50);
+      // 生成上下文相关消息
+      const { message, emotion, type } = await generateContextualMessage(decision, analysis);
+      
+      const success = await sendBarkNotification('缪尔赛思', message, emotion);
+      
+      if (success) {
+        const state = await loadState();
+        state.lastProactiveMessageTime = Date.now();
+        
+        // 🔥 记录主动推送到对话记忆
+        const conversationMemory = await loadConversationMemory();
+        conversationMemory.recentMessages.push({
+          role: 'assistant',
+          content: message,
+          timestamp: Date.now(),
+          source: 'proactive_push',
+          emotion: emotion,
+          type: type
+        });
+        
+        // 保留最近 80 条
+        if (conversationMemory.recentMessages.length > 80) {
+          conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-80);
+        }
+        
+        conversationMemory.lastUpdate = Date.now();
+        
+        await saveConversationMemory(conversationMemory);
+        await saveState(state);
+        
+        const pushLog = await loadPushLog();
+        pushLog.count++;
+        pushLog.messages.push({
+          time: new Date().toISOString(),
+          message: message,
+          emotion: emotion,
+          type: type,
+          score: decision.score,
+          reasons: decision.reasons
+        });
+        await savePushLog(pushLog);
+        
+        console.log(`💕 主动推送成功 [${pushLog.count}/${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET}] [${type}] ${message.substring(0, 30)}...`);
       }
-      
-      // 更新对话上下文
-      if (state.conversationContext) {
-        state.conversationContext.lastAssistantMessage = message.text;
-      }
-      
-      await saveState(state);
-      
-      console.log(`✅ 推送成功！今日 ${state.todayPushCount}/${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET}`);
-      console.log(`📝 [${message.topicType}] ${message.text}`);
     } else {
-      console.error('❌ 推送失败');
+      console.log(`⏸️ 暂不推送 - ${decision.reason}`);
     }
     
   } catch (err) {
-    console.error('❌ mainLoop 错误:', err.message);
+    console.error('❌ 主循环异常:', err.message);
   }
 }
 
@@ -854,10 +963,12 @@ async function mainLoop() {
 
 app.get('/', async (req, res) => {
   const events = await loadEvents();
-  const state = await loadState();
+  const pushLog = await loadPushLog();
+  const conversationMemory = await loadConversationMemory();
+  
   res.json({
     status: 'running',
-    version: '6.1-ultra-honeymoon',
+    version: '6.1-ultra-honeymoon-with-memory-sync',
     uptime: Math.floor(process.uptime()),
     events: {
       recurring: events.recurring.length,
@@ -866,52 +977,120 @@ app.get('/', async (req, res) => {
       onetime: events.onetime.length
     },
     push: {
-      today: state.lastPushDate,
-      count: state.todayPushCount,
-      target: CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET,
-      lastPushTime: state.lastProactiveTime ? new Date(state.lastProactiveTime).toLocaleString('zh-CN') : '未推送'
+      today: pushLog.today,
+      count: pushLog.count,
+      target: CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET
+    },
+    memory: {
+      conversationCount: conversationMemory.recentMessages.length,
+      lastUpdate: conversationMemory.lastUpdate
     },
     config: {
       hasBark: !!CONFIG.BARK_KEY,
       hasDeepseek: !!CONFIG.DEEPSEEK_KEY,
-      checkInterval: `${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000}分钟`,
-      pushInterval: `${CONFIG.ULTRA_HONEYMOON_MODE.MIN_INTERVAL / 60000}-${CONFIG.ULTRA_HONEYMOON_MODE.MAX_INTERVAL / 60000}分钟`
+      checkInterval: CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000 + ' 分钟',
+      minInterval: CONFIG.ULTRA_HONEYMOON_MODE.MIN_INTERVAL / 60000 + ' 分钟'
     }
   });
+});
+
+// 🔥 新增：获取完整状态（包含对话记忆）
+app.get('/api/state', async (req, res) => {
+  try {
+    const state = await loadState();
+    const conversationMemory = await loadConversationMemory();
+    
+    // 合并对话记忆到状态
+    state.conversationContext = {
+      recentMessages: conversationMemory.recentMessages,
+      lastSyncTime: conversationMemory.lastUpdate
+    };
+    
+    res.json(state);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/update-state', async (req, res) => {
   try {
     const state = await loadState();
     
-    // 更新交互时间
-    if (req.body.lastInteractionTime) {
-      state.lastInteractionTime = req.body.lastInteractionTime;
-    }
-    
+    // 🔥 关键：用户聊天不重置 lastProactiveMessageTime
+    if (req.body.lastInteractionTime) state.lastInteractionTime = req.body.lastInteractionTime;
     if (req.body.mood) state.mood = req.body.mood;
     if (req.body.energy !== undefined) state.energy = req.body.energy;
+    if (req.body.userAttentionScore !== undefined) state.userAttentionScore = req.body.userAttentionScore;
     if (req.body.scene) state.scene = req.body.scene;
+    if (req.body.recentMessages) state.recentMessages = req.body.recentMessages;
     
-    // 🔥 更新对话上下文
-    if (req.body.conversationContext) {
-      if (!state.conversationContext) {
-        state.conversationContext = {};
-      }
+    // 记录用户聊天会话（不影响主动推送）
+    if (!state.userChatSessions) state.userChatSessions = [];
+    state.userChatSessions.push({
+      time: Date.now(),
+      messageCount: req.body.recentMessages?.length || 0
+    });
+    state.userChatSessions = state.userChatSessions.slice(-20);
+    
+    await saveState(state);
+    console.log('✅ 状态同步成功（不影响主动推送计时）');
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 🔥 新增：同步游戏对话到 Railway
+app.post('/api/sync-conversation', async (req, res) => {
+  try {
+    const { messages } = req.body;
+    
+    if (!Array.isArray(messages)) {
+      return res.status(400).json({ error: '消息格式错误' });
+    }
+    
+    const conversationMemory = await loadConversationMemory();
+    
+    // 合并新消息（去重）
+    for (const msg of messages) {
+      // 检查是否已存在（基于内容和时间戳）
+      const exists = conversationMemory.recentMessages.some(m => 
+        m.content === msg.content && 
+        Math.abs((m.timestamp || m.at || 0) - (msg.timestamp || msg.at || 0)) < 60000
+      );
       
-      if (req.body.conversationContext.recentMessages) {
-        state.conversationContext.recentMessages = req.body.conversationContext.recentMessages.slice(-20);
-      }
-      
-      if (req.body.conversationContext.lastUserMessage) {
-        state.conversationContext.lastUserMessage = req.body.conversationContext.lastUserMessage;
+      if (!exists) {
+        conversationMemory.recentMessages.push({
+          role: msg.role,
+          content: msg.content,
+          timestamp: msg.timestamp || msg.at || Date.now(),
+          source: msg.source || 'game_sync'
+        });
       }
     }
     
-    await saveState(state);
-    console.log('✅ 状态同步成功');
-    res.json({ success: true });
+    // 按时间排序
+    conversationMemory.recentMessages.sort((a, b) => 
+      (a.timestamp || 0) - (b.timestamp || 0)
+    );
+    
+    // 保留最近 80 条
+    if (conversationMemory.recentMessages.length > 80) {
+      conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-80);
+    }
+    
+    conversationMemory.lastUpdate = Date.now();
+    
+    await saveConversationMemory(conversationMemory);
+    
+    console.log(`✅ 对话同步成功，当前共 ${conversationMemory.recentMessages.length} 条消息`);
+    
+    res.json({ 
+      success: true, 
+      totalMessages: conversationMemory.recentMessages.length 
+    });
   } catch (err) {
+    console.error('❌ 对话同步失败:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -954,59 +1133,45 @@ app.delete('/api/events/:type/:id', async (req, res) => {
     const { type, id } = req.params;
     const events = await loadEvents();
     
-    if (!events[type]) {
+    if (!['recurring', 'yearly', 'monthly', 'onetime'].includes(type)) {
       return res.status(400).json({ error: '无效的事件类型' });
     }
     
-    const index = events[type].findIndex(e => e.id === id);
-    if (index === -1) {
+    if (!Array.isArray(events[type])) {
+      return res.status(404).json({ error: '事件类型不存在' });
+    }
+    
+    const initialLength = events[type].length;
+    events[type] = events[type].filter(e => e.id !== id);
+    
+    if (events[type].length === initialLength) {
       return res.status(404).json({ error: '事件未找到' });
     }
     
-    events[type].splice(index, 1);
     await saveEvents(events);
-    
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/state', async (req, res) => {
-  const state = await loadState();
-  res.json(state);
-});
-
 // ===== 启动服务 =====
-app.listen(CONFIG.PORT, async () => {
-  console.log(`\n🚀 缪尔赛思后端 v6.1 - 超高频智能推送`);
-  console.log(`   端口: ${CONFIG.PORT}`);
-  console.log(`   BARK: ${CONFIG.BARK_KEY ? '✅' : '❌'}`);
-  console.log(`   DeepSeek: ${CONFIG.DEEPSEEK_KEY ? '✅' : '❌'}`);
-  console.log(`\n📊 推送配置:`);
-  console.log(`   目标频率: 每小时 ${CONFIG.ULTRA_HONEYMOON_MODE.TARGET_PER_HOUR} 条`);
-  console.log(`   每日目标: ${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET} 条`);
-  console.log(`   检查间隔: 每 ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000} 分钟`);
-  console.log(`   推送间隔: ${CONFIG.ULTRA_HONEYMOON_MODE.MIN_INTERVAL / 60000}-${CONFIG.ULTRA_HONEYMOON_MODE.MAX_INTERVAL / 60000} 分钟`);
-  console.log(`   高峰时段: ${CONFIG.ULTRA_HONEYMOON_MODE.PEAK_HOURS.join(', ')}:00\n`);
-  
+(async () => {
   await initStorage();
   
-  // 检查事件
-  setInterval(checkTodayEvents, 60 * 60 * 1000);
+  // 立即执行一次主循环
+  console.log('🚀 执行首次检查...');
+  await mainLoop();
   
-  // 启动后 15 秒首次检查
-  setTimeout(async () => {
-    console.log('🔄 首次检查...');
-    await mainLoop();
-  }, 15000);
+  // 设置定时循环（8 分钟一次）
+  setInterval(mainLoop, CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL);
+  console.log(`⏰ 已设置 ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000} 分钟循环检查`);
   
-  // 每 8 分钟检查一次
-  setInterval(async () => {
-    const now = new Date();
-    console.log(`\n🔄 [${now.toLocaleTimeString('zh-CN')}] 定时检查`);
-    await mainLoop();
-  }, CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL);
-  
-  console.log('✅ 超高频推送系统已启动！\n');
-});
+  app.listen(CONFIG.PORT, () => {
+    console.log(`✅ Railway 后端已启动 - 端口 ${CONFIG.PORT}`);
+    console.log(`🔥 超热恋模式：每日目标 ${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET} 条消息`);
+    console.log(`📱 每 ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000} 分钟检查一次`);
+    console.log(`💚 最短推送间隔 ${CONFIG.ULTRA_HONEYMOON_MODE.MIN_INTERVAL / 60000} 分钟`);
+    console.log(`💾 完整记忆同步已启用`);
+  });
+})();
