@@ -882,7 +882,12 @@ async function sendBarkNotification(title, message, emotion = 'happy') {
     
     const sound = soundMap[emotion] || 'calypso';
     
-    const url = `https://api.day.app/${CONFIG.BARK_KEY}/${encodeURIComponent(title)}/${encodeURIComponent(message)}?sound=${sound}&group=muelsyse&url=scriptable:///run/WaterShift?message=${encodeURIComponent(message)}&emotion=${emotion}`;
+    // 🔥 修复：正确编码 URL 参数，解决消息显示成 "playful" 的问题
+    const baseUrl = 'scriptable:///run/WaterShift';
+    const params = `message=${encodeURIComponent(message)}&emotion=${emotion}`;
+    const callbackUrl = `${baseUrl}?${params}`;
+    
+    const url = `https://api.day.app/${CONFIG.BARK_KEY}/${encodeURIComponent(title)}/${encodeURIComponent(message)}?sound=${sound}&group=muelsyse&url=${encodeURIComponent(callbackUrl)}`;
     
     await axios.get(url, { timeout: 10000 });
     console.log('✅ Bark 推送成功');
@@ -915,25 +920,41 @@ async function mainLoop() {
         const state = await loadState();
         state.lastProactiveMessageTime = Date.now();
         
-        // 🔥 记录主动推送到对话记忆
+        // 🔥 记录主动推送到对话记忆（添加去重）
         const conversationMemory = await loadConversationMemory();
-        conversationMemory.recentMessages.push({
-          role: 'assistant',
-          content: message,
-          timestamp: Date.now(),
-          source: 'proactive_push',
-          emotion: emotion,
-          type: type
-        });
+        const timestamp = Date.now();
         
-        // 保留最近 80 条
-        if (conversationMemory.recentMessages.length > 80) {
-          conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-80);
+        // 检查是否已存在（60秒内相同内容算重复）
+        const exists = conversationMemory.recentMessages.some(m => 
+          m.content === message && 
+          Math.abs((m.timestamp || 0) - timestamp) < 60000
+        );
+        
+        if (!exists) {
+          conversationMemory.recentMessages.push({
+            role: 'assistant',
+            content: message,
+            timestamp: timestamp,
+            source: 'proactive_push',
+            emotion: emotion,
+            type: type
+          });
+          
+          // 按时间排序
+          conversationMemory.recentMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+          
+          // 保留最近 80 条
+          if (conversationMemory.recentMessages.length > 80) {
+            conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-80);
+          }
+          
+          conversationMemory.lastUpdate = timestamp;
+          
+          await saveConversationMemory(conversationMemory);
+          console.log(`💾 [记忆同步] 推送消息已记录: ${message.substring(0, 30)}...`);
+        } else {
+          console.log(`⏭️ [记忆同步] 跳过重复消息`);
         }
-        
-        conversationMemory.lastUpdate = Date.now();
-        
-        await saveConversationMemory(conversationMemory);
         await saveState(state);
         
         const pushLog = await loadPushLog();
@@ -968,7 +989,7 @@ app.get('/', async (req, res) => {
   
   res.json({
     status: 'running',
-    version: '6.1-ultra-honeymoon-with-memory-sync',
+    version: '6.4-fixed-bark-url-and-unified-memory',
     uptime: Math.floor(process.uptime()),
     events: {
       recurring: events.recurring.length,
@@ -1040,7 +1061,7 @@ app.post('/api/update-state', async (req, res) => {
   }
 });
 
-// 🔥 新增：同步游戏对话到 Railway
+// 🔥 修复：同步游戏对话到 Railway（改进去重逻辑）
 app.post('/api/sync-conversation', async (req, res) => {
   try {
     const { messages } = req.body;
@@ -1050,22 +1071,30 @@ app.post('/api/sync-conversation', async (req, res) => {
     }
     
     const conversationMemory = await loadConversationMemory();
+    let addedCount = 0;
     
-    // 合并新消息（去重）
+    // 合并新消息（改进的去重）
     for (const msg of messages) {
-      // 检查是否已存在（基于内容和时间戳）
+      if (!msg.role || !msg.content) continue;
+      
+      const timestamp = msg.timestamp || msg.at || Date.now();
+      
+      // 检查是否已存在（60秒内相同内容和角色算重复）
       const exists = conversationMemory.recentMessages.some(m => 
+        m.role === msg.role &&
         m.content === msg.content && 
-        Math.abs((m.timestamp || m.at || 0) - (msg.timestamp || msg.at || 0)) < 60000
+        Math.abs((m.timestamp || 0) - timestamp) < 60000
       );
       
       if (!exists) {
         conversationMemory.recentMessages.push({
           role: msg.role,
           content: msg.content,
-          timestamp: msg.timestamp || msg.at || Date.now(),
-          source: msg.source || 'game_sync'
+          timestamp: timestamp,
+          source: msg.source || 'game_sync',
+          emotion: msg.emotion || null
         });
+        addedCount++;
       }
     }
     
@@ -1074,19 +1103,20 @@ app.post('/api/sync-conversation', async (req, res) => {
       (a.timestamp || 0) - (b.timestamp || 0)
     );
     
-    // 保留最近 80 条
-    if (conversationMemory.recentMessages.length > 80) {
-      conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-80);
+    // 保留最近 100 条（增加容量）
+    if (conversationMemory.recentMessages.length > 100) {
+      conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-100);
     }
     
     conversationMemory.lastUpdate = Date.now();
     
     await saveConversationMemory(conversationMemory);
     
-    console.log(`✅ 对话同步成功，当前共 ${conversationMemory.recentMessages.length} 条消息`);
+    console.log(`✅ 游戏对话同步：新增 ${addedCount} 条，总计 ${conversationMemory.recentMessages.length} 条`);
     
     res.json({ 
-      success: true, 
+      success: true,
+      addedCount: addedCount,
       totalMessages: conversationMemory.recentMessages.length 
     });
   } catch (err) {
@@ -1168,10 +1198,11 @@ app.delete('/api/events/:type/:id', async (req, res) => {
   console.log(`⏰ 已设置 ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000} 分钟循环检查`);
   
   app.listen(CONFIG.PORT, () => {
-    console.log(`✅ Railway 后端已启动 - 端口 ${CONFIG.PORT}`);
+    console.log(`✅ Railway 后端已启动 v6.4 - 端口 ${CONFIG.PORT}`);
     console.log(`🔥 超热恋模式：每日目标 ${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET} 条消息`);
     console.log(`📱 每 ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 60000} 分钟检查一次`);
     console.log(`💚 最短推送间隔 ${CONFIG.ULTRA_HONEYMOON_MODE.MIN_INTERVAL / 60000} 分钟`);
-    console.log(`💾 完整记忆同步已启用`);
+    console.log(`💾 统一记忆系统已启用 (完全互通)`);
+    console.log(`✅ Bark URL 参数修复完成 (不再显示 emotion 名)`);
   });
 })();
