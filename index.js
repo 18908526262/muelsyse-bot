@@ -1,4 +1,4 @@
-// ===== Railway 后端 v5.0：DeepSeek Function Calling 智能版 =====
+// ===== Railway 后端 v5.1：支持每月循环事件（经期等）=====
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs').promises;
@@ -51,8 +51,9 @@ async function initStorage() {
       await fs.access(FILES.EVENTS);
     } catch {
       await fs.writeFile(FILES.EVENTS, JSON.stringify({
-        recurring: [],
-        onetime: []
+        recurring: [],  // 每年重复（生日）
+        monthly: [],    // 每月重复（经期、还款日）
+        onetime: []     // 一次性（回学校）
       }, null, 2));
     }
     
@@ -94,10 +95,17 @@ async function saveState(state) {
 async function loadEvents() {
   try {
     const data = await fs.readFile(FILES.EVENTS, 'utf-8');
-    return JSON.parse(data);
+    const events = JSON.parse(data);
+    
+    // 确保所有数组都存在
+    if (!events.recurring) events.recurring = [];
+    if (!events.monthly) events.monthly = [];
+    if (!events.onetime) events.onetime = [];
+    
+    return events;
   } catch (err) {
     console.error('⚠️ 读取事件失败:', err.message);
-    return { recurring: [], onetime: [] };
+    return { recurring: [], monthly: [], onetime: [] };
   }
 }
 
@@ -120,7 +128,7 @@ async function callDeepSeekWithTools(messages, tools) {
     const response = await axios.post(
       'https://api.deepseek.com/chat/completions',
       {
-        model: 'deepseek-chat', // 注意：tool_calls 只支持 deepseek-chat
+        model: 'deepseek-chat',
         messages: messages,
         tools: tools,
         tool_choice: 'auto',
@@ -182,6 +190,33 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
     {
       type: 'function',
       function: {
+        name: 'save_monthly_event',
+        description: '保存每月重复事件。当用户提到每月固定日期的事件时调用，例如"经期每月8-9号"、"信用卡每月15号还款"、"月租每月1号"。',
+        parameters: {
+          type: 'object',
+          properties: {
+            day: {
+              type: 'integer',
+              description: '每月的日期（1-31）',
+              minimum: 1,
+              maximum: 31
+            },
+            event_name: {
+              type: 'string',
+              description: '事件名称，例如"经期"、"信用卡还款"、"月租"'
+            },
+            custom_message: {
+              type: 'string',
+              description: '可选的自定义提醒文案'
+            }
+          },
+          required: ['day', 'event_name']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
         name: 'save_onetime_event',
         description: '保存一次性事件。当用户提到临时安排时调用。',
         parameters: {
@@ -217,11 +252,14 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
 
 规则：
 1. 生日信息 → 调用 save_birthday_event
-2. 临时安排（回学校、开会、约会等）→ 调用 save_onetime_event
-3. 如果用户只是随便聊天，不调用任何工具
+2. 每月重复事件（经期、还款日、月租等）→ 调用 save_monthly_event
+3. 一次性临时安排（回学校、开会、约会等）→ 调用 save_onetime_event
+4. 如果用户只是随便聊天，不调用任何工具
 
 日期解析规范：
 - "12月20日" → month=12, day=20
+- "每月8号" → day=8 (用于 save_monthly_event)
+- "每月8-9号" → 选择第一个日期 day=8
 - "6月15号" → 如果今年6月15日已过，则年份用 ${currentYear + 1}，否则用 ${currentYear}，格式为 ${currentYear}-06-15
 - "明天" → 计算明天的日期后转为 YYYY-MM-DD
 - "下周一" → 计算下周一的日期后转为 YYYY-MM-DD
@@ -229,7 +267,9 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
 当前日期：${currentDate}
 当前年份：${currentYear}
 
-重要：date 参数必须是完整的 YYYY-MM-DD 格式，例如 ${currentYear}-06-15`
+重要：
+- date 参数必须是完整的 YYYY-MM-DD 格式
+- monthly event 只需要 day（1-31），会每月重复触发`
     }
   ];
   
@@ -311,6 +351,34 @@ async function executeEventSave(functionName, args) {
       };
     }
     
+    if (functionName === 'save_monthly_event') {
+      // 验证参数
+      if (!args.day || !args.event_name) {
+        return { success: false, message: '事件信息不完整' };
+      }
+      
+      if (args.day < 1 || args.day > 31) {
+        return { success: false, message: '日期格式错误' };
+      }
+      
+      const newEvent = {
+        id: `monthly_${Date.now()}`,
+        name: args.event_name,
+        day: parseInt(args.day),
+        message: args.custom_message || `小鲨，今天是${args.event_name}的日子哦～`
+      };
+      
+      events.monthly.push(newEvent);
+      await saveEvents(events);
+      
+      console.log(`✅ 每月循环事件已保存: ${args.event_name} - 每月${args.day}号`);
+      
+      return {
+        success: true,
+        message: `好哒～每月${args.day}号${args.event_name}，我已经记下来了！到时候会提醒你的～`
+      };
+    }
+    
     if (functionName === 'save_onetime_event') {
       // 验证参数
       if (!args.date || !args.event_name) {
@@ -364,12 +432,25 @@ async function checkTodayEvents() {
   const events = await loadEvents();
   const triggered = [];
   
-  // 检查生日（周期性事件）
+  // 检查生日（每年重复）
   if (Array.isArray(events.recurring)) {
     events.recurring.forEach(event => {
       if (event.month === month && event.day === day) {
         triggered.push({
           type: 'recurring',
+          name: event.name,
+          message: event.message
+        });
+      }
+    });
+  }
+  
+  // 检查每月循环事件（经期、还款日等）
+  if (Array.isArray(events.monthly)) {
+    events.monthly.forEach(event => {
+      if (event.day === day) {
+        triggered.push({
+          type: 'monthly',
           name: event.name,
           message: event.message
         });
@@ -400,10 +481,12 @@ async function checkTodayEvents() {
     
     // 发送推送通知
     for (const event of triggered) {
+      const emotion = event.type === 'recurring' ? 'happy' : 
+                      event.type === 'monthly' ? 'concerned' : 'playful';
       await sendBarkNotification(
         `📅 ${event.name}`,
         event.message,
-        event.type === 'recurring' ? 'happy' : 'concerned'
+        emotion
       );
       console.log(`✅ 事件提醒已发送: ${event.name}`);
     }
@@ -459,10 +542,11 @@ app.get('/', async (req, res) => {
   const events = await loadEvents();
   res.json({
     status: 'running',
-    version: '5.0-function-calling',
+    version: '5.1-monthly-events',
     uptime: Math.floor(process.uptime()),
     events: {
       recurring: events.recurring.length,
+      monthly: events.monthly.length,
       onetime: events.onetime.length
     },
     config: {
@@ -548,6 +632,16 @@ app.delete('/api/events/:type/:id', async (req, res) => {
       } else {
         res.status(404).json({ error: '事件不存在' });
       }
+    } else if (type === 'monthly' && Array.isArray(events.monthly)) {
+      const originalLength = events.monthly.length;
+      events.monthly = events.monthly.filter(e => e.id !== id);
+      
+      if (events.monthly.length < originalLength) {
+        await saveEvents(events);
+        res.json({ success: true, message: '每月循环事件已删除' });
+      } else {
+        res.status(404).json({ error: '事件不存在' });
+      }
     } else if (type === 'onetime' && Array.isArray(events.onetime)) {
       const originalLength = events.onetime.length;
       events.onetime = events.onetime.filter(e => e.id !== id);
@@ -594,7 +688,7 @@ async function start() {
   await initStorage();
   
   app.listen(CONFIG.PORT, () => {
-    console.log(`🚀 缪尔赛思后端 v5.0 Function Calling 版`);
+    console.log(`🚀 缪尔赛思后端 v5.1 每月循环事件版`);
     console.log(`   端口: ${CONFIG.PORT}`);
     console.log(`   Bark: ${CONFIG.BARK_KEY ? '已配置' : '未配置'}`);
     console.log(`   DeepSeek: ${CONFIG.DEEPSEEK_KEY ? '已配置' : '未配置'}`);
