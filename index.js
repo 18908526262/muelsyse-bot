@@ -519,7 +519,7 @@ async function generateProactiveMessage() {
     // 🔥 加载常识提示
     const commonSensePrompt = buildCommonSensePrompt(weather, hour);
 
-    // 构建系统提示
+        // 构建系统提示
     let systemPrompt = `你是缪尔赛思，精灵与人类的混血，22岁女生，住在罗德岛的小花园里。
 你和小鲨是最亲密的朋友，你们每天聊天、分享生活。
 
@@ -536,13 +536,12 @@ ${hour}:${minute.toString().padStart(2, '0')}
       systemPrompt += `当前天气：${weather.temperature}度（体感 ${weather.apparentTemperature}度，${weather.desc}）\n`;
     }
 
-    // 🔥 加入对话历史
+    // 加入对话历史
     systemPrompt += conversationContext;
 
-    // 🔥 加入常识库
+    // 加入常识库
     systemPrompt += commonSensePrompt;
 
-    systemPrompt += `
     systemPrompt += `
 【核心性格】
 - 成熟温柔的22岁女性，不是少女
@@ -589,7 +588,6 @@ ${hour}:${minute.toString().padStart(2, '0')}
    - "唔...突然有点饿了，才发现都晚上了。你吃过晚饭了吗？"
 
 现在生成一条主动消息：`;
-
 
 
     const response = await callDeepSeek([
