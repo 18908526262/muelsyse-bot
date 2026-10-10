@@ -67,7 +67,8 @@ const CONFIG = {
   DATA_DIR: path.join(__dirname, 'data'),
 
   ULTRA_HONEYMOON_MODE: {
-    CHECK_INTERVAL: 3 * 60 * 1000
+    CHECK_INTERVAL: 3 * 60 * 1000,
+
     MIN_INTERVAL: 15 * 60 * 1000,
     MAX_INTERVAL: 50 * 60 * 1000,
     DAILY_TARGET: 30,
@@ -647,6 +648,10 @@ async function sendBarkNotification(message) {
 
 // ===== 🔥 超级智能事件识别 =====
 async function intelligentEventDetection(userMessage, conversationHistory = [], timeInfo = null) {
+  const tools = [
+    {
+      type: 'function',
+
 
       type: 'function',
       function: {
