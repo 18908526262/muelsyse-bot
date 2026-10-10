@@ -467,12 +467,15 @@ async function buildConversationContext() {
     context += `${speaker} (${time}): ${msg.content}\n`;
   });
 
-  context += '\n**重要提示**：\n';
+    context += '\n**重要提示**：\n';
   context += '1. 上面是你和小鲨最近的对话历史（时间均为中国时间）\n';
   context += '2. 生成主动消息时，要基于对话历史，体现连贯性\n';
   context += '3. 不要重复已经说过的话\n';
   context += '4. 如果刚聊过相关话题，可以自然延续\n';
-  context += '5. 如果很久没聊，可以表达想念\n\n';
+  context += '5. 如果很久没聊，可以表达想念\n';
+  context += '6. 🔥【关键】仔细查看最近一条对话的内容和时间，不要问已经回答过的问题\n';
+  context += '7. 🔥 如果小鲨刚说完某件事（如"洗完澡了"），不要再重复问相关问题\n\n';
+
 
   return context;
 }
@@ -512,9 +515,27 @@ async function generateProactiveMessage() {
     const now = getChinaTime();          // 🔥 中国时间
     const hour = now.getHours();
     const minute = now.getMinutes();
+  
+
+    // 🔥 检查最近是否有对话（5分钟内有对话则不推送）
+    const memory = await loadConversationMemory();
+    const recentChats = memory.recentMessages.slice(-5);
+    
+    if (recentChats.length > 0) {
+      const lastMessage = recentChats[recentChats.length - 1];
+      const timeSinceLastChat = Date.now() - (lastMessage.timestamp || 0);
+      
+      if (timeSinceLastChat < 5 * 60 * 1000) {
+        console.log('💬 最近刚聊过天（' + Math.floor(timeSinceLastChat / 60000) + '分钟前），跳过主动推送');
+        return null;
+      }
+    }
 
     // 🔥 加载对话历史上下文
     const conversationContext = await buildConversationContext();
+
+
+  
 
     // 🔥 加载常识提示
     const commonSensePrompt = buildCommonSensePrompt(weather, hour);
@@ -988,6 +1009,15 @@ async function mainPushLoop() {
         console.log('📊 今日已达推送上限');
         return;
       }
+            // 🔥 新增：检查游戏是否活跃（5分钟内有交互则跳过）
+      if (state.lastInteractionTime) {
+        const timeSinceInteraction = now - state.lastInteractionTime;
+        if (timeSinceInteraction < 5 * 60 * 1000) {
+          console.log('🎮 游戏端活跃中，跳过主动推送');
+          return;
+        }
+      }
+
 
       // 检查夜间时段（🔥 按中国时间）
       if (hour >= CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_START || hour < CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_END) {
