@@ -67,7 +67,7 @@ const CONFIG = {
   DATA_DIR: path.join(__dirname, 'data'),
 
   ULTRA_HONEYMOON_MODE: {
-    CHECK_INTERVAL: 8 * 60 * 1000,
+    CHECK_INTERVAL: 3 * 60 * 1000
     MIN_INTERVAL: 15 * 60 * 1000,
     MAX_INTERVAL: 50 * 60 * 1000,
     DAILY_TARGET: 30,
@@ -646,9 +646,8 @@ async function sendBarkNotification(message) {
 }
 
 // ===== 🔥 超级智能事件识别 =====
-async function intelligentEventDetection(userMessage, conversationHistory = []) {
-  const tools = [
-    {
+async function intelligentEventDetection(userMessage, conversationHistory = [], timeInfo = null) {
+
       type: 'function',
       function: {
         name: 'save_birthday_event',
@@ -750,7 +749,26 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
     }
   ];
 
+    // 🔥 获取当前中国时间
+  const now = timeInfo ? new Date(timeInfo.currentTime) : getChinaTime();
+  const hour = timeInfo ? timeInfo.currentHour : now.getHours();
+  const minute = timeInfo ? timeInfo.currentMinute : now.getMinutes();
+  const dateStr = getChinaDateStr(now);
+  
+  const timeContext = `${hour}:${String(minute).padStart(2, '0')}`;
+  const period = hour < 6 ? '深夜' : hour < 12 ? '上午' : hour < 18 ? '下午' : '晚上';
+
   const systemPrompt = `你是事件识别助手。分析用户消息，判断是否包含需要记录的事件。
+
+【当前精确时间（非常重要！）】
+现在是北京时间：${timeContext}（${period}）
+今天日期：${dateStr}
+
+【时间理解规则（关键！）】
+1. "一会儿10:10" = 如果现在是21:00，那就是今晚22:10，不是明天早上！
+2. "明天9点" = ${dateStr}的第二天
+3. "下午3点" = 如果现在是上午，就是今天下午；如果现在是晚上，就是明天下午
+4. **永远基于当前时间${timeContext}来推理，不要猜测！**
 
 **识别规则**：
 1. 生日事件：XX的生日是X月X日
@@ -766,6 +784,7 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
 - 询问性质："你明天有空吗"
 
 如果识别到事件，调用对应的函数。如果没有识别到，不调用任何函数。`;
+
 
   let messages = [{ role: 'system', content: systemPrompt }];
 
@@ -994,6 +1013,138 @@ async function checkTriggeredEvents() {
 }
 
 // ===== 主推送逻辑 =====
+// 🔥 AI心跳思考系统：让她真正"想起"该做的事
+async function aiHeartbeatThinking() {
+  try {
+    const state = await loadState();
+    const memory = await loadConversationMemory();
+    const events = await loadEvents();
+    const now = getChinaTime();
+    const hour = now.getHours();
+    const minute = now.getMinutes();
+    
+    // 获取最近对话
+    const recentMessages = memory.recentMessages.slice(-10);
+    let lastUserMessage = '';
+    let lastUserTime = 0;
+    
+    for (let i = recentMessages.length - 1; i >= 0; i--) {
+      if (recentMessages[i].role === 'user') {
+        lastUserMessage = recentMessages[i].content;
+        lastUserTime = recentMessages[i].timestamp || 0;
+        break;
+      }
+    }
+    
+    const minutesSinceLastChat = Math.floor((Date.now() - lastUserTime) / 60000);
+    
+    // 检查即将到来的事件（未来1小时内）
+    const upcomingEvents = [];
+    const todayStr = getChinaDateStr(now);
+    const currentMinutes = hour * 60 + minute;
+    
+    events.onetime.forEach(e => {
+      if (e.date === todayStr && e.time && !e.notified) {
+        const [eventHour, eventMinute] = e.time.split(':').map(Number);
+        const eventMinutes = eventHour * 60 + eventMinute;
+        const diff = eventMinutes - currentMinutes;
+        if (diff > -5 && diff <= 60) {  // 提前1小时到过后5分钟
+          upcomingEvents.push({ ...e, minutesUntil: diff });
+        }
+      }
+    });
+    
+    events.daily.forEach(e => {
+      if (e.time && e.lastFired !== todayStr) {
+        const [eventHour, eventMinute] = e.time.split(':').map(Number);
+        const eventMinutes = eventHour * 60 + eventMinute;
+        const diff = eventMinutes - currentMinutes;
+        if (diff > -5 && diff <= 60) {
+          upcomingEvents.push({ ...e, minutesUntil: diff, type: 'daily' });
+        }
+      }
+    });
+    
+    // 构建思考上下文
+    const thinkingPrompt = `你是缪尔赛思，现在独自在花园里，你在想小鲨的事情。
+
+【当前时间】
+北京时间：${hour}:${String(minute).padStart(2, '0')}
+
+【你的记忆】
+小鲨上次找你：${minutesSinceLastChat}分钟前
+他上次说："${lastUserMessage.slice(0, 100)}"
+
+【你的小本子记的事】
+${upcomingEvents.length > 0 ? upcomingEvents.map(e => 
+  `- ${e.event_name}（${e.minutesUntil > 0 ? `还有${e.minutesUntil}分钟` : `过了${-e.minutesUntil}分钟`}）`
+).join('\n') : '暂时没有即将到来的事'}
+
+【你现在要思考】
+1. 小鲨上次说的话，有没有暗示什么即将发生的事？
+   例如："我动车坐很久，晚上9点多才到" → 现在快9点了，他会孤独，该关心
+   例如："我后天去看音乐会" → 如果今天是那天，该祝福
+
+2. 小本子上的事，有没有快到时间了？
+   - 如果还有30分钟以上：不用提醒
+   - 如果10-30分钟：可以温柔提醒
+   - 如果5分钟内或刚过：马上提醒
+
+3. 他提到的活动时间（如"7点玩游戏"），现在是不是该避免打扰？
+   - 如果他说了活动时间，且现在在那个时间段，就不要打扰
+
+【判断规则】
+- 如果没有特别的事 → 回答 NO
+- 如果有事该提醒或关心 → 回答 YES + 要发的消息
+
+【回答格式（必须JSON）】
+{"action":"NO"}
+或
+{"action":"YES","message":"消息内容（30-50字，温柔自然）","reason":"原因"}
+
+现在思考：`;
+
+    const response = await callDeepSeek([
+      { role: 'system', content: thinkingPrompt }
+    ]);
+    
+    if (!response || !response.choices || !response.choices[0]) {
+      return null;
+    }
+    
+    const text = response.choices[0].message.content.trim();
+    console.log('🧠 AI心跳思考:', text);
+    
+    try {
+      // 提取JSON（处理markdown代码块）
+      let jsonText = text;
+      if (text.includes('```')) {
+        const match = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+        if (match) jsonText = match[1];
+      }
+      
+      const result = JSON.parse(jsonText);
+      
+      if (result.action === 'YES' && result.message) {
+        return {
+          shouldSend: true,
+          message: result.message,
+          reason: result.reason || 'AI主动思考'
+        };
+      }
+    } catch (e) {
+      console.warn('⚠️ 心跳思考JSON解析失败:', e.message);
+    }
+    
+    return null;
+    
+  } catch (err) {
+    console.error('❌ AI心跳思考失败:', err.message);
+    return null;
+  }
+}
+
+
 async function mainPushLoop() {
   console.log('🚀 主推送循环启动');
 
@@ -1076,6 +1227,42 @@ async function mainPushLoop() {
         }
         return;
       }
+            // 🔥 AI心跳思考：让她自己想起该做的事
+      const heartbeatThinking = await aiHeartbeatThinking();
+      if (heartbeatThinking && heartbeatThinking.shouldSend) {
+        console.log('💭 AI心跳触发:', heartbeatThinking.reason);
+        
+        const success = await sendBarkNotification(heartbeatThinking.message);
+        if (success) {
+          state.lastProactiveMessageTime = now;
+          pushLog.count++;
+          pushLog.messages.push({
+            time: new Date().toISOString(),
+            timeCN: getChinaStamp(),
+            message: heartbeatThinking.message,
+            trigger: 'ai_heartbeat',
+            reason: heartbeatThinking.reason
+          });
+          
+          await saveState(state);
+          await savePushLog(pushLog);
+          
+          // 记录到对话历史
+          const memory = await loadConversationMemory();
+          memory.recentMessages.push({
+            role: 'assistant',
+            content: heartbeatThinking.message,
+            timestamp: now,
+            source: 'ai_heartbeat',
+            emotion: state.mood || 'neutral'
+          });
+          memory.recentMessages = memory.recentMessages.slice(-50);
+          await saveConversationMemory(memory);
+        }
+        return; // 发完就不生成随机消息了
+      }
+
+
 
       // 🔥 生成智能主动消息
       const message = await generateProactiveMessage();
@@ -1234,13 +1421,25 @@ app.get('/api/state', async (req, res) => {
 // 🔥 事件识别接口
 app.post('/api/events/detect', async (req, res) => {
   try {
-    const { message, conversationHistory } = req.body;
+        const { message, conversationHistory, currentTime, currentHour, currentMinute } = req.body;
+    
+    // 🔥 打印用户说话时间，方便调试
+    const timeStr = currentHour !== undefined ? `${currentHour}:${String(currentMinute).padStart(2, '0')}` : '未知';
+    console.log(`📅 用户说话时间: ${timeStr} - "${message}"`);
+
 
     if (!message) {
       return res.status(400).json({ error: '缺少 message 参数' });
     }
 
-    const detection = await intelligentEventDetection(message, conversationHistory || []);
+        const timeInfo = (currentTime || currentHour !== undefined) ? {
+      currentTime: currentTime || new Date().toISOString(),
+      currentHour: currentHour !== undefined ? currentHour : getChinaHour(),
+      currentMinute: currentMinute !== undefined ? currentMinute : getChinaTime().getMinutes()
+    } : null;
+    
+    const detection = await intelligentEventDetection(message, conversationHistory || [], timeInfo);
+
 
     if (detection.detected) {
       await saveDetectedEvent(detection);
