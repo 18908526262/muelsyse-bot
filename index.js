@@ -1159,6 +1159,26 @@ app.get('/api/conversation/history', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// 🔥 获取完整对话记忆（前端同步用）
+app.get('/api/conversation', async (req, res) => {
+  try {
+    const memory = await loadConversationMemory();
+    
+    res.json({
+      recentMessages: memory.recentMessages || [],
+      lastUpdate: memory.lastUpdate || Date.now(),
+      version: memory.version || 1
+    });
+  } catch (err) {
+    console.error('❌ 获取对话记忆失败:', err.message);
+    res.status(500).json({ 
+      error: err.message,
+      recentMessages: [],
+      lastUpdate: Date.now()
+    });
+  }
+});
+
 
 // 上传状态
 app.post('/api/state', async (req, res) => {
