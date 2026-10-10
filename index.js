@@ -1,4 +1,4 @@
-// ===== Railway 后端 v6.4：完整版 + 改进相对时间识别 =====
+// ===== Railway 后端 v7.0：超级智能版 =====
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs').promises;
@@ -15,16 +15,15 @@ const CONFIG = {
   PORT: process.env.PORT || 8080,
   DATA_DIR: path.join(__dirname, 'data'),
   
-  // 🔥 超热恋模式配置
   ULTRA_HONEYMOON_MODE: {
-    CHECK_INTERVAL: 8 * 60 * 1000,           // 每 8 分钟检查一次
-    MIN_INTERVAL: 15 * 60 * 1000,            // 最短间隔 15 分钟
-    MAX_INTERVAL: 50 * 60 * 1000,            // 最长间隔 50 分钟
-    DAILY_TARGET: 30,                         // 每日目标 30 条
+    CHECK_INTERVAL: 8 * 60 * 1000,
+    MIN_INTERVAL: 15 * 60 * 1000,
+    MAX_INTERVAL: 50 * 60 * 1000,
+    DAILY_TARGET: 30,
     NIGHT_START: 23,
     NIGHT_END: 7,
-    PEAK_HOURS: [12, 18, 21],                // 高峰时段
-    QUICK_REPLY_THRESHOLD: 10 * 60 * 1000   // 10分钟内回复=热聊
+    PEAK_HOURS: [12, 18, 21],
+    QUICK_REPLY_THRESHOLD: 10 * 60 * 1000
   }
 };
 
@@ -35,12 +34,43 @@ const FILES = {
   CONVERSATION: path.join(CONFIG.DATA_DIR, 'conversation_memory.json')
 };
 
+// ===== 辅助函数 =====
+function addDays(date, days) {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result.toISOString().split('T')[0];
+}
+
+function getDayName(date) {
+  const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  return days[date.getDay()];
+}
+
+function getEndOfMonth(date) {
+  const year = date.getFullYear();
+  const month = date.getMonth();
+  return new Date(year, month + 1, 0).toISOString().split('T')[0];
+}
+
+function getNextWeekday(currentDate, targetDay) {
+  const current = new Date(currentDate);
+  const currentDay = current.getDay();
+  let daysToAdd = targetDay - currentDay;
+  if (daysToAdd <= 0) daysToAdd += 7;
+  return addDays(current, daysToAdd);
+}
+
+function addHours(date, hours) {
+  const result = new Date(date);
+  result.setHours(result.getHours() + hours);
+  return result.toISOString();
+}
+
 // ===== 初始化存储 =====
 async function initStorage() {
   try {
     await fs.mkdir(CONFIG.DATA_DIR, { recursive: true });
     
-    // 初始化状态文件
     try {
       await fs.access(FILES.STATE);
     } catch {
@@ -60,7 +90,6 @@ async function initStorage() {
       }, null, 2));
     }
     
-    // 初始化对话记忆文件
     try {
       await fs.access(FILES.CONVERSATION);
     } catch {
@@ -71,7 +100,6 @@ async function initStorage() {
       }, null, 2));
     }
     
-    // 初始化事件文件
     try {
       await fs.access(FILES.EVENTS);
     } catch {
@@ -79,11 +107,12 @@ async function initStorage() {
         recurring: [],
         yearly: [],
         monthly: [],
+        weekly: [],
+        daily: [],
         onetime: []
       }, null, 2));
     }
     
-    // 初始化推送日志
     try {
       await fs.access(FILES.PUSH_LOG);
     } catch {
@@ -105,15 +134,12 @@ async function loadState() {
   try {
     const data = await fs.readFile(FILES.STATE, 'utf-8');
     const state = JSON.parse(data);
-    
-    // 确保 conversationContext 存在
     if (!state.conversationContext) {
       state.conversationContext = {
         recentMessages: [],
         lastSyncTime: null
       };
     }
-    
     return state;
   } catch (err) {
     return {
@@ -170,11 +196,20 @@ async function loadEvents() {
     if (!events.recurring) events.recurring = [];
     if (!events.yearly) events.yearly = [];
     if (!events.monthly) events.monthly = [];
+    if (!events.weekly) events.weekly = [];
+    if (!events.daily) events.daily = [];
     if (!events.onetime) events.onetime = [];
     
     return events;
   } catch (err) {
-    return { recurring: [], yearly: [], monthly: [], onetime: [] };
+    return { 
+      recurring: [], 
+      yearly: [], 
+      monthly: [], 
+      weekly: [], 
+      daily: [], 
+      onetime: [] 
+    };
   }
 }
 
@@ -275,14 +310,14 @@ async function callDeepSeekWithTools(messages, tools) {
   }
 }
 
-// ===== 🔥 改进版：智能事件识别（支持相对时间）=====
+// ===== 🔥 超级智能事件识别 =====
 async function intelligentEventDetection(userMessage, conversationHistory = []) {
   const tools = [
     {
       type: 'function',
       function: {
         name: 'save_birthday_event',
-        description: '保存生日事件（每年重复）。',
+        description: '保存生日事件（每年重复）',
         parameters: {
           type: 'object',
           properties: {
@@ -299,7 +334,7 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
       type: 'function',
       function: {
         name: 'save_yearly_event',
-        description: '保存年度循环事件。例如"每年五一去看音律联觉"、"每年春节回家"。',
+        description: '保存年度循环事件，如"每年五一去看音律联觉"',
         parameters: {
           type: 'object',
           properties: {
@@ -316,7 +351,7 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
       type: 'function',
       function: {
         name: 'save_monthly_event',
-        description: '保存每月重复事件。',
+        description: '保存每月重复事件，如"每月1号发工资"',
         parameters: {
           type: 'object',
           properties: {
@@ -331,12 +366,51 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
     {
       type: 'function',
       function: {
+        name: 'save_weekly_event',
+        description: '保存每周重复事件，如"每周五开会"',
+        parameters: {
+          type: 'object',
+          properties: {
+            weekday: { 
+              type: 'integer', 
+              minimum: 0, 
+              maximum: 6,
+              description: '0=周日,1=周一,2=周二,3=周三,4=周四,5=周五,6=周六'
+            },
+            time: { type: 'string', description: '时间，格式HH:mm，可选' },
+            event_name: { type: 'string' },
+            custom_message: { type: 'string' }
+          },
+          required: ['weekday', 'event_name']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'save_daily_event',
+        description: '保存每日重复事件，如"每天早上8点吃药"',
+        parameters: {
+          type: 'object',
+          properties: {
+            time: { type: 'string', description: '时间，格式HH:mm' },
+            event_name: { type: 'string' },
+            custom_message: { type: 'string' }
+          },
+          required: ['time', 'event_name']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
         name: 'save_onetime_event',
-        description: '保存一次性事件。支持相对时间（明天、后天）和绝对日期。',
+        description: '保存一次性事件。支持相对时间（明天、后天）和绝对日期',
         parameters: {
           type: 'object',
           properties: {
             date: { type: 'string', description: '日期格式 YYYY-MM-DD' },
+            time: { type: 'string', description: '时间，格式HH:mm，可选' },
             event_name: { type: 'string' },
             custom_message: { type: 'string' }
           },
@@ -352,7 +426,6 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
   const currentMonth = now.getMonth() + 1;
   const currentDay = now.getDate();
   
-  // 计算明天和后天的日期
   const tomorrow = new Date(now);
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowDate = tomorrow.toISOString().split('T')[0];
@@ -361,39 +434,94 @@ async function intelligentEventDetection(userMessage, conversationHistory = []) 
   dayAfterTomorrow.setDate(dayAfterTomorrow.getDate() + 2);
   const dayAfterTomorrowDate = dayAfterTomorrow.toISOString().split('T')[0];
   
+  const threeDaysLater = addDays(now, 3);
+  const oneWeekLater = addDays(now, 7);
+  const endOfMonthDate = getEndOfMonth(now);
+  
   const messages = [
     {
       role: 'system',
-      content: `你是缪尔赛思的智能日程助手。
-
-规则：
-1. 生日 → save_birthday_event
-2. 年度循环（"每年五一去XXX"）→ save_yearly_event
-3. 每月重复 → save_monthly_event
-4. 一次性安排 → save_onetime_event
-
-【🔥 重要】相对时间转换：
-- "明天" → ${tomorrowDate}
-- "后天" → ${dayAfterTomorrowDate}
-- "今天" → ${currentDate}
+      content: `你是专业的时间语义识别助手，擅长理解中文口语化的时间表达。
 
 【当前时间信息】
-当前日期：${currentDate}
+今天：${currentDate} (${getDayName(now)})
+明天：${tomorrowDate}
+后天：${dayAfterTomorrowDate}
 当前年份：${currentYear}
-明天日期：${tomorrowDate}
-后天日期：${dayAfterTomorrowDate}
 
-【识别示例】
-✅ "明天我要回学校" → save_onetime_event { date: "${tomorrowDate}", event_name: "回学校" }
-✅ "提醒我后天开会" → save_onetime_event { date: "${dayAfterTomorrowDate}", event_name: "开会" }
-✅ "5月20日回学校" → save_onetime_event { date: "${currentYear}-05-20", event_name: "回学校" }
-✅ "我爸爸生日是3月15号" → save_birthday_event { month: 3, day: 15, person_name: "爸爸" }
-✅ "每年五一去看音律联觉" → save_yearly_event { month: 5, day: 1, event_name: "去看音律联觉" }
+【时间计算规则 - 严格遵守】
+相对时间转换（必须输出ISO格式日期）：
+1. "明天" → ${tomorrowDate}
+2. "后天" → ${dayAfterTomorrowDate}
+3. "过几天"/"这几天"/"最近" → ${threeDaysLater}
+4. "一周后"/"下周" → ${oneWeekLater}
+5. "月底"/"本月底" → ${endOfMonthDate}
+6. "X天后" → 从今天加X天
+7. "X小时后" → 从现在加X小时
+8. "改天" → ${threeDaysLater}
 
-【判断标准】
-- 包含"提醒"、"记得"、"别忘了" → 很可能是事件
-- 包含时间词 + 动作 → 很可能是事件
-- 只是聊天提及某件事，没有提醒意图 → 不是事件`
+模糊表达标准化：
+- "一会儿" → 2小时后
+- "晚点" → 3小时后
+- "待会" → 1小时后
+
+绝对日期转换：
+- "5月20日" → ${currentYear}-05-20
+- "下个月15号" → 计算下月日期
+- "X月X号" → ${currentYear}-XX-XX
+
+【事件类型识别规则】
+1. 生日 → save_birthday_event
+   识别："XX的生日是X月X号"
+
+2. 年度循环 → save_yearly_event
+   识别："每年X月X号XXX"
+
+3. 每月重复 → save_monthly_event
+   识别："每月X号XXX"、"每个月X号XXX"
+
+4. 每周重复 → save_weekly_event
+   识别："每周X开会"、"每周五XXX"
+   weekday映射：周一=1,周二=2,周三=3,周四=4,周五=5,周六=6,周日=0
+
+5. 每日重复 → save_daily_event
+   识别："每天X点XXX"、"每天早上XXX"
+
+6. 一次性事件 → save_onetime_event
+   识别：包含明确日期+动作的表达
+
+【判断标准 - 非常重要】
+✅ 一定识别为提醒：
+- 明确说"提醒我"、"别忘了"、"记得"、"帮我记着"
+- 时间词 + 动作动词（如："明天去医院"、"后天开会"）
+- 包含"要"、"得"、"需要" + 时间 + 动作
+
+✅ 模糊表达也要识别：
+- "我明天干嘛" → 识别为需要在明天设置提醒
+- "过几天我要XXX" → 3天后的提醒
+- "改天再说" → 3天后的提醒
+- "最近要XXX" → 3天后的提醒
+
+❌ 不识别：
+- 纯询问："明天干什么？"（没有动作）
+- 已完成："我昨天去了医院"
+- 不确定："我可能明天去"（有"可能"）
+
+【输出示例】
+输入："明天下午3点开会"
+输出：save_onetime_event { date: "${tomorrowDate}", time: "15:00", event_name: "开会" }
+
+输入："过几天提醒我交作业"
+输出：save_onetime_event { date: "${threeDaysLater}", event_name: "交作业" }
+
+输入："每天早上8点吃药"
+输出：save_daily_event { time: "08:00", event_name: "吃药" }
+
+输入："每周五下午开会"
+输出：save_weekly_event { weekday: 5, time: "15:00", event_name: "开会" }
+
+【关键原则】
+宁可多识别，不要漏掉。当有50%以上把握是用户想设置提醒时，就应该识别。`
     }
   ];
   
@@ -511,6 +639,54 @@ async function executeEventSave(functionName, args) {
       };
     }
     
+    if (functionName === 'save_weekly_event') {
+      if (args.weekday === undefined || !args.event_name) {
+        return { success: false, message: '事件信息不完整' };
+      }
+      
+      const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+      const newEvent = {
+        id: `weekly_${Date.now()}`,
+        name: args.event_name,
+        weekday: parseInt(args.weekday),
+        time: args.time || null,
+        message: args.custom_message || `小鲨，今天${weekdays[args.weekday]}要${args.event_name}哦～`
+      };
+      
+      events.weekly.push(newEvent);
+      await saveEvents(events);
+      
+      console.log(`✅ 每周循环事件已保存: ${args.event_name}`);
+      
+      return {
+        success: true,
+        message: `好哒～每${weekdays[args.weekday]}${args.time ? ' ' + args.time : ''}${args.event_name}，我记住了～`
+      };
+    }
+    
+    if (functionName === 'save_daily_event') {
+      if (!args.time || !args.event_name) {
+        return { success: false, message: '事件信息不完整' };
+      }
+      
+      const newEvent = {
+        id: `daily_${Date.now()}`,
+        name: args.event_name,
+        time: args.time,
+        message: args.custom_message || `小鲨，该${args.event_name}啦～`
+      };
+      
+      events.daily.push(newEvent);
+      await saveEvents(events);
+      
+      console.log(`✅ 每日循环事件已保存: ${args.event_name}`);
+      
+      return {
+        success: true,
+        message: `好哒～每天${args.time} ${args.event_name}，我帮你记着～`
+      };
+    }
+    
     if (functionName === 'save_onetime_event') {
       if (!args.date || !args.event_name) {
         return { success: false, message: '事件信息不完整' };
@@ -524,6 +700,7 @@ async function executeEventSave(functionName, args) {
         id: `onetime_${Date.now()}`,
         name: args.event_name,
         date: args.date,
+        time: args.time || null,
         message: args.custom_message || `小鲨今天要${args.event_name}啦～`
       };
       
@@ -534,7 +711,7 @@ async function executeEventSave(functionName, args) {
       
       return {
         success: true,
-        message: `好哒～${args.date} ${args.event_name}，我记着呢～`
+        message: `好哒～${args.date}${args.time ? ' ' + args.time : ''} ${args.event_name}，我记着呢～`
       };
     }
     
@@ -555,8 +732,10 @@ async function checkTodayEvents() {
   const month = bjTime.getUTCMonth() + 1;
   const day = bjTime.getUTCDate();
   const hour = bjTime.getUTCHours();
+  const minute = bjTime.getUTCMinutes();
+  const weekday = bjTime.getUTCDay();
   
-  if (hour < 7 || hour >= 8) return;
+  if (hour < 7 || hour >= 23) return;
   
   const events = await loadEvents();
   const triggered = [];
@@ -564,7 +743,7 @@ async function checkTodayEvents() {
   // 检查生日
   if (Array.isArray(events.recurring)) {
     events.recurring.forEach(event => {
-      if (event.month === month && event.day === day) {
+      if (event.month === month && event.day === day && hour === 8 && minute === 0) {
         triggered.push({ type: 'recurring', name: event.name, message: event.message });
       }
     });
@@ -573,7 +752,7 @@ async function checkTodayEvents() {
   // 检查年度循环事件
   if (Array.isArray(events.yearly)) {
     events.yearly.forEach(event => {
-      if (event.month === month && event.day === day) {
+      if (event.month === month && event.day === day && hour === 8 && minute === 0) {
         triggered.push({ type: 'yearly', name: event.name, message: event.message });
       }
     });
@@ -582,8 +761,34 @@ async function checkTodayEvents() {
   // 检查每月循环
   if (Array.isArray(events.monthly)) {
     events.monthly.forEach(event => {
-      if (event.day === day) {
+      if (event.day === day && hour === 8 && minute === 0) {
         triggered.push({ type: 'monthly', name: event.name, message: event.message });
+      }
+    });
+  }
+  
+  // 检查每周循环
+  if (Array.isArray(events.weekly)) {
+    events.weekly.forEach(event => {
+      if (event.weekday === weekday) {
+        if (event.time) {
+          const [eventHour, eventMinute] = event.time.split(':').map(Number);
+          if (hour === eventHour && minute === eventMinute) {
+            triggered.push({ type: 'weekly', name: event.name, message: event.message });
+          }
+        } else if (hour === 8 && minute === 0) {
+          triggered.push({ type: 'weekly', name: event.name, message: event.message });
+        }
+      }
+    });
+  }
+  
+  // 检查每日循环
+  if (Array.isArray(events.daily)) {
+    events.daily.forEach(event => {
+      const [eventHour, eventMinute] = event.time.split(':').map(Number);
+      if (hour === eventHour && minute === eventMinute) {
+        triggered.push({ type: 'daily', name: event.name, message: event.message });
       }
     });
   }
@@ -594,20 +799,32 @@ async function checkTodayEvents() {
   if (Array.isArray(events.onetime)) {
     events.onetime = events.onetime.filter(event => {
       if (event.date === todayStr) {
-        triggered.push({ type: 'onetime', name: event.name, message: event.message });
-        return false;
+        if (event.time) {
+          const [eventHour, eventMinute] = event.time.split(':').map(Number);
+          if (hour === eventHour && minute === eventMinute) {
+            triggered.push({ type: 'onetime', name: event.name, message: event.message });
+            return false;
+          }
+          return true;
+        } else if (hour === 8 && minute === 0) {
+          triggered.push({ type: 'onetime', name: event.name, message: event.message });
+          return false;
+        }
       }
-      return true;
+      return event.date >= todayStr;
     });
+    
+    if (triggered.length > 0) {
+      await saveEvents(events);
+    }
   }
   
   if (triggered.length > 0) {
-    await saveEvents(events);
-    
     for (const event of triggered) {
       const emotion = event.type === 'recurring' ? 'happy' : 
                       event.type === 'yearly' ? 'playful' :
-                      event.type === 'monthly' ? 'concerned' : 'playful';
+                      event.type === 'weekly' ? 'concerned' :
+                      event.type === 'daily' ? 'concerned' : 'playful';
       await sendBarkNotification(
         `📅 ${event.name}`,
         event.message,
@@ -623,7 +840,6 @@ async function analyzeConversationContext() {
   const state = await loadState();
   const conversationMemory = await loadConversationMemory();
   
-  // 获取最近 20 条消息
   const recentMessages = conversationMemory.recentMessages.slice(-20);
   
   if (recentMessages.length === 0) {
@@ -635,13 +851,11 @@ async function analyzeConversationContext() {
     };
   }
   
-  // 简单关键词提取
   const allText = recentMessages.map(m => m.content).join(' ');
   
   const interests = [];
   const topics = [];
   
-  // 兴趣检测
   if (/咖啡|薄荷茶|甜品|蛋糕/.test(allText)) interests.push('美食');
   if (/猫|狗|动物|宠物/.test(allText)) interests.push('动物');
   if (/植物|花|园子|生态/.test(allText)) interests.push('植物');
@@ -659,12 +873,10 @@ async function analyzeConversationContext() {
   };
 }
 
-// ===== 🔥 生成上下文相关消息（修复版）=====
+// ===== 🔥 生成上下文相关消息 =====
 async function generateContextualMessage(context, analysis) {
-  // 定义有效的 emotion 列表
   const VALID_EMOTIONS = ['happy', 'playful', 'coax', 'lonely', 'concerned'];
   
-  // Fallback 消息池
   const fallbacks = [
     { message: '小鲨～在忙什么呀？想你了～', emotion: 'coax', type: 'miss' },
     { message: '唔，你最近都在忙什么呢？', emotion: 'lonely', type: 'greeting' },
@@ -681,13 +893,12 @@ async function generateContextualMessage(context, analysis) {
     const bjTime = new Date(Date.now() + 8 * 60 * 60 * 1000);
     const hour = bjTime.getUTCHours();
     
-    // 话题类型权重
     const topicWeights = {
-      continuation: 35,  // 延续话题
-      interest: 25,      // 兴趣相关
-      care: 20,          // 关心健康
-      share: 15,         // 分享日常
-      weather: 5         // 天气相关
+      continuation: 35,
+      interest: 25,
+      care: 20,
+      share: 15,
+      weather: 5
     };
     
     const rand = Math.random() * 100;
@@ -715,27 +926,13 @@ ${context.weather ? `天气：${context.weather.temperature}°C（体感${contex
 最近话题：${analysis.recentTopics.join('、') || '未知'}
 是否需要关心：${analysis.needsCare ? '是' : '否'}
 
-【话题类型说明】
-- continuation: 延续最近聊过的话题（"对了，你上次说的XXX怎么样了？"）
-- interest: 结合她的兴趣（"刚看到XXX，突然想到你喜欢这个"）
-- care: 关心她的状态（"最近累不累呀？要注意休息哦～"）
-- share: 分享自己的日常（"刚才在生态园看到XXX，好有趣～"）
-- weather: 天气相关（"今天天气XXX，记得穿暖和点～"）
-
 【角色要求】
 你是热恋期的女友，想主动联系男友的那种感觉：
 - 真情实感，不是打卡式问候
 - 可以分享自己的小事、想法、感受
 - 可以关心对方，但用俏皮温柔的方式
 - 可以撒娇、想念、期待见面
-- 绝对不要像AI助手（"需要我帮你什么吗"这种话）
-
-【消息类型示例】
-✅ [continuation] "小鲨～你上次说要去的那个地方去了吗？好不好玩呀～"
-✅ [interest] "刚路过甜品店看到海盐焦糖布丁，突然想起你喜欢这个味道～"
-✅ [care] "最近看你好像很忙呀，记得按时吃饭哦～我可记着呢"
-✅ [share] "唔，今天生态园的新品多肉到了，超可爱的～给你拍了照片"
-✅ [weather] "今天降温了哎，你那边冷不冷？记得多穿点～"
+- 绝对不要像AI助手
 
 【输出格式】
 第一行：消息内容（50-80字）
@@ -765,70 +962,50 @@ playful`;
     const text = response.data.choices[0].message.content.trim();
     const lines = text.split('\n').map(l => l.trim()).filter(l => l);
     
-    console.log('🤖 AI 原始返回:', text);
-    
-    // 🔥 修复：更严格的解析逻辑
     let message = '';
     let emotion = 'coax';
     
     if (lines.length === 0) {
-      console.warn('⚠️ AI 返回为空，使用 fallback');
       return fallbacks[Math.floor(Math.random() * fallbacks.length)];
     }
     
     if (lines.length === 1) {
       const singleLine = lines[0].toLowerCase();
-      // 如果只有一行且是 emotion，使用 fallback
       if (VALID_EMOTIONS.includes(singleLine)) {
-        console.warn('⚠️ AI 只返回了 emotion，使用 fallback');
         return fallbacks[Math.floor(Math.random() * fallbacks.length)];
       }
-      // 如果只有一行且不是 emotion，当作消息内容
       message = lines[0];
       emotion = 'coax';
     } else {
-      // 多行情况：最后一行可能是 emotion
       const lastLine = lines[lines.length - 1].toLowerCase();
       
       if (VALID_EMOTIONS.includes(lastLine)) {
-        // 最后一行是 emotion
         emotion = lastLine;
         message = lines.slice(0, -1).join(' ');
       } else {
-        // 最后一行不是 emotion，全部当作消息
         message = lines.join(' ');
         emotion = 'coax';
       }
     }
     
-    // 🔥 最终验证：消息内容必须合法
     message = message.trim();
     
-    // 检查消息是否太短或者包含无效内容
     if (message.length < 5) {
-      console.warn('⚠️ 消息太短，使用 fallback');
       return fallbacks[Math.floor(Math.random() * fallbacks.length)];
     }
     
-    // 检查消息是否误包含了 emotion 关键词（单独出现）
     if (VALID_EMOTIONS.includes(message.toLowerCase())) {
-      console.warn('⚠️ 消息内容是 emotion 关键词，使用 fallback');
       return fallbacks[Math.floor(Math.random() * fallbacks.length)];
     }
     
-    // 检查消息是否以 emotion 关键词开头（误把 emotion 当消息）
     if (VALID_EMOTIONS.some(e => message.toLowerCase().startsWith(e))) {
-      console.warn('⚠️ 消息以 emotion 开头，清理后使用');
-      // 尝试移除开头的 emotion
       for (const e of VALID_EMOTIONS) {
         if (message.toLowerCase().startsWith(e)) {
           message = message.substring(e.length).trim();
           break;
         }
       }
-      // 如果清理后太短，使用 fallback
       if (message.length < 5) {
-        console.warn('⚠️ 清理后消息太短，使用 fallback');
         return fallbacks[Math.floor(Math.random() * fallbacks.length)];
       }
     }
@@ -851,45 +1028,36 @@ async function shouldSendProactiveMessage() {
   const bjTime = new Date(now + 8 * 60 * 60 * 1000);
   const hour = bjTime.getUTCHours();
   
-  // 夜间静默
   if (hour >= CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_START || hour < CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_END) {
     return { shouldSend: false, reason: '夜间静默时段' };
   }
   
-  // 检查今日推送次数
   if (pushLog.count >= CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET) {
     return { shouldSend: false, reason: `今日已推送 ${pushLog.count} 次` };
   }
   
-  // 最后一次主动推送时间
   const lastProactive = state.lastProactiveMessageTime || 0;
   const timeSinceLastProactive = now - lastProactive;
   
-  // 动态间隔计算
   let minInterval = CONFIG.ULTRA_HONEYMOON_MODE.MIN_INTERVAL;
   
-  // 🔥 高峰时段缩短间隔
   if (CONFIG.ULTRA_HONEYMOON_MODE.PEAK_HOURS.includes(hour)) {
-    minInterval = minInterval * 0.6;  // 缩短 40%
+    minInterval = minInterval * 0.6;
   }
   
-  // 🔥 用户刚回复过，快速跟进
   const timeSinceLastInteraction = now - (state.lastInteractionTime || 0);
   if (timeSinceLastInteraction < CONFIG.ULTRA_HONEYMOON_MODE.QUICK_REPLY_THRESHOLD) {
-    minInterval = minInterval * 0.4;  // 缩短 60%
+    minInterval = minInterval * 0.4;
   }
   
-  // 最短间隔检查
   if (timeSinceLastProactive < minInterval) {
     const remainingMinutes = Math.ceil((minInterval - timeSinceLastProactive) / 60000);
     return { shouldSend: false, reason: `距上次主动推送仅 ${remainingMinutes} 分钟` };
   }
   
-  // 智能评分系统
   let score = 0;
   let reasons = [];
   
-  // 天气因素 (20%)
   if (weather) {
     if (Math.abs(weather.temperature - weather.apparentTemperature) > 5) {
       score += 20;
@@ -901,7 +1069,6 @@ async function shouldSendProactiveMessage() {
     }
   }
   
-  // 时间因素 (25%)
   if (hour >= 7 && hour <= 9) {
     score += 20;
     reasons.push('早晨时段');
@@ -910,7 +1077,6 @@ async function shouldSendProactiveMessage() {
     reasons.push('高峰时段');
   }
   
-  // 互动因素 (30%)
   const hoursSinceInteraction = timeSinceLastInteraction / (1000 * 60 * 60);
   
   if (hoursSinceInteraction > 4) {
@@ -924,20 +1090,17 @@ async function shouldSendProactiveMessage() {
     reasons.push('刚才在聊天，趁热追一条');
   }
   
-  // 推送频率因素 (15%)
   const pushRatio = pushLog.count / CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET;
   if (pushRatio < 0.3) {
     score += 15;
     reasons.push('今日推送较少');
   }
   
-  // 随机因素 (10%)
   if (Math.random() > 0.7) {
     score += 10;
     reasons.push('突然想到你');
   }
   
-  // 决策阈值：50分（降低阈值，增加推送频率）
   if (score >= 50) {
     return {
       shouldSend: true,
@@ -968,7 +1131,6 @@ async function sendBarkNotification(title, message, emotion = 'happy') {
     
     const sound = soundMap[emotion] || 'calypso';
     
-    // 🔥 正确编码 URL 参数
     const baseUrl = 'scriptable:///run/WaterShift';
     const params = `message=${encodeURIComponent(message)}&emotion=${emotion}`;
     const callbackUrl = `${baseUrl}?${params}`;
@@ -991,10 +1153,7 @@ async function executeProactivePush() {
   const decision = await shouldSendProactiveMessage();
   
   if (decision.shouldSend) {
-    // 分析对话上下文
     const analysis = await analyzeConversationContext();
-    
-    // 生成上下文相关消息
     const { message, emotion, type } = await generateContextualMessage(decision, analysis);
     
     const success = await sendBarkNotification('缪尔赛思', message, emotion);
@@ -1003,11 +1162,9 @@ async function executeProactivePush() {
       const state = await loadState();
       state.lastProactiveMessageTime = Date.now();
       
-      // 🔥 记录主动推送到对话记忆（添加去重）
       const conversationMemory = await loadConversationMemory();
       const timestamp = Date.now();
       
-      // 检查是否已存在（60秒内相同内容算重复）
       const exists = conversationMemory.recentMessages.some(m => 
         m.content === message && 
         Math.abs((m.timestamp || 0) - timestamp) < 60000
@@ -1023,20 +1180,16 @@ async function executeProactivePush() {
           type: type
         });
         
-        // 按时间排序
         conversationMemory.recentMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         
-        // 保留最近 80-100 条
         if (conversationMemory.recentMessages.length > 100) {
           conversationMemory.recentMessages = conversationMemory.recentMessages.slice(-100);
         }
         
         conversationMemory.lastUpdate = timestamp;
         await saveConversationMemory(conversationMemory);
-        console.log(`✅ 消息已记录到对话记忆 (共 ${conversationMemory.recentMessages.length} 条)`);
       }
       
-      // 更新推送日志
       const pushLog = await loadPushLog();
       pushLog.count++;
       pushLog.messages.push({
@@ -1058,12 +1211,10 @@ async function executeProactivePush() {
 
 // ===== API 路由 =====
 
-// 健康检查
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: Date.now() });
 });
 
-// 获取状态
 app.get('/api/state', async (req, res) => {
   try {
     const state = await loadState();
@@ -1073,7 +1224,6 @@ app.get('/api/state', async (req, res) => {
   }
 });
 
-// 更新状态
 app.post('/api/state', async (req, res) => {
   try {
     const state = await loadState();
@@ -1085,7 +1235,6 @@ app.post('/api/state', async (req, res) => {
   }
 });
 
-// 获取完整对话记忆
 app.get('/api/conversation', async (req, res) => {
   try {
     const memory = await loadConversationMemory();
@@ -1095,7 +1244,6 @@ app.get('/api/conversation', async (req, res) => {
   }
 });
 
-// 🔥 游戏同步对话记忆到 Railway
 app.post('/api/sync-conversation', async (req, res) => {
   try {
     const { messages } = req.body;
@@ -1112,7 +1260,6 @@ app.post('/api/sync-conversation', async (req, res) => {
       
       const timestamp = msg.timestamp || msg.at || Date.now();
       
-      // 🔥 去重：60秒内相同内容+角色算重复
       const exists = conversationMemory.recentMessages.some(m => 
         m.role === msg.role &&
         m.content === msg.content && 
@@ -1131,7 +1278,6 @@ app.post('/api/sync-conversation', async (req, res) => {
       }
     }
     
-    // 排序 + 保留最近 100 条
     conversationMemory.recentMessages.sort((a, b) => 
       (a.timestamp || 0) - (b.timestamp || 0)
     );
@@ -1156,7 +1302,6 @@ app.post('/api/sync-conversation', async (req, res) => {
   }
 });
 
-// 🔥 用户消息接收（触发状态更新 + 事件识别）
 app.post('/api/user-message', async (req, res) => {
   try {
     const { message, timestamp } = req.body;
@@ -1167,12 +1312,10 @@ app.post('/api/user-message', async (req, res) => {
     
     console.log(`📧 收到用户消息: "${message}"`);
     
-    // 更新状态
     const state = await loadState();
     state.lastInteractionTime = timestamp || Date.now();
     await saveState(state);
     
-    // 记录到对话记忆
     const conversationMemory = await loadConversationMemory();
     const ts = timestamp || Date.now();
     
@@ -1201,7 +1344,6 @@ app.post('/api/user-message', async (req, res) => {
       console.log(`✅ 消息已记录到对话记忆 (共 ${conversationMemory.recentMessages.length} 条)`);
     }
     
-    // 🔥 智能事件识别
     const detectionResult = await intelligentEventDetection(
       message, 
       conversationMemory.recentMessages.slice(-10)
@@ -1232,7 +1374,6 @@ app.post('/api/user-message', async (req, res) => {
   }
 });
 
-// 手动触发主动推送
 app.post('/api/trigger-push', async (req, res) => {
   try {
     await executeProactivePush();
@@ -1242,7 +1383,6 @@ app.post('/api/trigger-push', async (req, res) => {
   }
 });
 
-// 获取推送日志
 app.get('/api/push-log', async (req, res) => {
   try {
     const log = await loadPushLog();
@@ -1252,7 +1392,6 @@ app.get('/api/push-log', async (req, res) => {
   }
 });
 
-// 获取事件列表
 app.get('/api/events', async (req, res) => {
   try {
     const events = await loadEvents();
@@ -1262,7 +1401,6 @@ app.get('/api/events', async (req, res) => {
   }
 });
 
-// 添加事件
 app.post('/api/events', async (req, res) => {
   try {
     const { type, data } = req.body;
@@ -1281,7 +1419,6 @@ app.post('/api/events', async (req, res) => {
   }
 });
 
-// 删除事件
 app.delete('/api/events/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1320,10 +1457,11 @@ setInterval(async () => {
   await initStorage();
   
   app.listen(CONFIG.PORT, () => {
-    console.log(`🚀 Railway 后端启动成功！`);
+    console.log(`🚀 Railway 后端启动成功！版本：v7.0 超级智能版`);
     console.log(`📡 端口: ${CONFIG.PORT}`);
     console.log(`⏰ 检查间隔: ${CONFIG.ULTRA_HONEYMOON_MODE.CHECK_INTERVAL / 1000 / 60} 分钟`);
     console.log(`📊 每日目标: ${CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET} 条消息`);
     console.log(`🌙 静默时段: ${CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_START}:00 - ${CONFIG.ULTRA_HONEYMOON_MODE.NIGHT_END}:00`);
+    console.log(`✨ 新功能: 支持每日/每周循环提醒，超强模糊表达识别`);
   });
 })();
