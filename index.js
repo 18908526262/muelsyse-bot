@@ -1019,7 +1019,8 @@ async function mainPushLoop() {
 
           // 🔥 将推送消息也记录到对话历史
           const memory = await loadConversationMemory();
-                    memory.recentMessages.push({
+          memory.recentMessages.push({
+
             role: 'assistant',
             content: event.message,
             timestamp: now,
@@ -1061,7 +1062,8 @@ async function mainPushLoop() {
 
         // 🔥 将推送消息也记录到对话历史
         const memory = await loadConversationMemory();
-                memory.recentMessages.push({
+        memory.recentMessages.push({
+
           role: 'assistant',
           content: message,
           timestamp: now,
