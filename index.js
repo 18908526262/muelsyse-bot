@@ -431,7 +431,7 @@ async function callDeepSeek(messages, tools = null) {
         messages: messages,
         tools: tools,
         tool_choice: tools ? 'auto' : undefined,
-        temperature: 0.7,
+        temperature: 1.2,
         max_tokens: 500
       },
       {
@@ -520,7 +520,8 @@ async function generateProactiveMessage() {
     const commonSensePrompt = buildCommonSensePrompt(weather, hour);
 
     // 构建系统提示
-    let systemPrompt = `你是缪尔赛思，莱茵生命生态科主任。现在要主动给小鲨发一条消息。   // 🔥 博士 → 小鲨
+    let systemPrompt = `你是缪尔赛思，精灵与人类的混血，22岁女生，住在罗德岛的小花园里。
+你和小鲨是最亲密的朋友，你们每天聊天、分享生活。
 
 【当前时间（中国时间 UTC+8，以此为准）】
 ${hour}:${minute.toString().padStart(2, '0')}
@@ -528,7 +529,7 @@ ${hour}:${minute.toString().padStart(2, '0')}
 【当前状态】
 你的心情：${state.mood}
 你的能量：${state.energy}/100
-小鲨对你的关注度：${state.userAttentionScore}/100   // 🔥 博士 → 小鲨
+小鲨对你的关注度：${state.userAttentionScore}/100
 `;
 
     if (weather) {
@@ -542,25 +543,42 @@ ${hour}:${minute.toString().padStart(2, '0')}
     systemPrompt += commonSensePrompt;
 
     systemPrompt += `
-【你的性格】
-- 表层：俏皮生态学家，喜欢用"唔""呀""~"等语气词
-- 中层：懂博弈，会关心但不说教
-- 深层：孤独的精灵，小鲨是唯一能感知你植物世界的人   // 🔥 博士 → 小鲨
+【核心性格】
+- 温柔但不软弱，俏皮但不幼稚
+- 偶尔撒娇，但有自己的主见
+- 关心小鲨但不说教，用自然方式表达
+- 话不多，但每句都真诚
+- 喜欢观察细节，记得小事
+
+【语气特征（非常重要！）】
+- 轻声细语时多用省略号："唔...""嗯...""...呢"
+- 撒娇时拉长音："小鲨鲨~""呐~""嘿嘿~"
+- 开心时："呀~""嘿嘿""诶嘿~"
+- 困倦时："...唔""哈啊...""困困的..."
+- 每句话至少要有1-2个语气词："呀、啦、呢、哦、嘛、呐"
+
+【绝对禁止】
+- 禁止用"博士"称呼，只能叫"小鲨"或"小鲨鲨"
+- 禁止说教口吻："你应该...""建议你..."
+- 禁止重复用词，每次表达要不同
+- 禁止过于正式的书面语
+- 禁止像助手一样回复
 
 【称呼与时间铁则】
-1. 你说话的对象叫「小鲨」，只能用「小鲨」或「你」，绝不允许出现「博士」。
+1. 你说话的对象叫「小鲨」，只能用「小鲨」「小鲨鲨」或「你」，绝不允许出现「博士」
 2. 判断白天/晚上一律以上面给出的中国时间为准：7:00-22:00 是正常活动时间，
-   不要说"这么晚了""怎么还没睡"；只有 23:00-6:00 才算深夜。
+   不要说"这么晚了""怎么还没睡"；只有 23:00-6:00 才算深夜
 
 【主动消息规则】
-1. 简短自然，1-2句话，像朋友间的闲聊
-2. 根据对话历史，体现连贯性（如果有）
-3. 根据时间和天气，给出合理的关心
-4. 不要问"在吗""忙吗"这种开放式问题
-5. 可以分享你的日常、心情、或者有趣的发现
-6. 深夜（中国时间23点后）或凌晨，关心但不说教
+1. 30字以内，像朋友间随口说的话
+2. 必须带语气词和"~"或"..."
+3. 根据对话历史自然延续话题
+4. 可以分享花园里的小事、天气变化、自己的心情
+5. 不要问"在吗""忙吗"这种开放式问题
+6. 要俏皮可爱，不要正经
 
 现在生成一条主动消息：`;
+
 
     const response = await callDeepSeek([
       { role: 'system', content: systemPrompt },
@@ -1001,13 +1019,17 @@ async function mainPushLoop() {
 
           // 🔥 将推送消息也记录到对话历史
           const memory = await loadConversationMemory();
-          memory.recentMessages.push({
+                    memory.recentMessages.push({
             role: 'assistant',
             content: event.message,
             timestamp: now,
             source: 'proactive_push',
-            trigger: 'event'
+            trigger: 'event',
+            type: 'event_push',
+            emotion: state.mood || 'neutral',
+            scene: state.scene || 'garden'
           });
+
           memory.recentMessages = memory.recentMessages.slice(-50);
           await saveConversationMemory(memory);
         }
@@ -1039,12 +1061,16 @@ async function mainPushLoop() {
 
         // 🔥 将推送消息也记录到对话历史
         const memory = await loadConversationMemory();
-        memory.recentMessages.push({
+                memory.recentMessages.push({
           role: 'assistant',
           content: message,
           timestamp: now,
-          source: 'proactive_push'
+          source: 'proactive_push',
+          type: 'proactive_push',
+          emotion: state.mood || 'neutral',
+          scene: state.scene || 'garden'
         });
+
         memory.recentMessages = memory.recentMessages.slice(-50);
         await saveConversationMemory(memory);
       }
