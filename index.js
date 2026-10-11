@@ -72,7 +72,7 @@ const CONFIG = {
 
     MIN_INTERVAL: 15 * 60 * 1000,
     MAX_INTERVAL: 50 * 60 * 1000,
-    DAILY_TARGET: 30,
+    DAILY_TARGET: 90,
     NIGHT_START: 23,   // 以下均按中国时间
     NIGHT_END: 7,
     PEAK_HOURS: [12, 18, 21],
@@ -1323,15 +1323,20 @@ async function mainPushLoop() {
       if (pushLog.count >= CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET) {
         console.log('📊 今日已达推送上限');
         return;
-      }
-            // 🔥 新增：检查游戏是否活跃（5分钟内有交互则跳过）
-      if (state.lastInteractionTime) {
-        const timeSinceInteraction = now - state.lastInteractionTime;
-        if (timeSinceInteraction < 5 * 60 * 1000) {
-          console.log('🎮 游戏端活跃中，跳过主动推送');
-          return;
+      }      // 🔥 检查游戏是否真正活跃（5分钟内有对话或触碰交互才跳过）
+      const memory = await loadConversationMemory();
+      if (memory.recentMessages && memory.recentMessages.length > 0) {
+        const lastMessage = memory.recentMessages[memory.recentMessages.length - 1];
+        // 只有用户发送的消息才算真正活跃
+        if (lastMessage.role === 'user') {
+          const timeSinceLastUserMessage = now - (lastMessage.timestamp || 0);
+          if (timeSinceLastUserMessage < 5 * 60 * 1000) {
+            console.log('💬 用户正在对话中（' + Math.floor(timeSinceLastUserMessage / 60000) + '分钟前发消息），跳过主动推送');
+            return;
+          }
         }
       }
+
 
 
       // 检查夜间时段（🔥 按中国时间）
