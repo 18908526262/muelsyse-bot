@@ -62,7 +62,8 @@ function getChinaStamp(ts) {
 // ===== 配置 =====
 const CONFIG = {
   BARK_KEY: process.env.BARK_KEY || '',
-  DEEPSEEK_KEY: process.env.DEEPSEEK_KEY || '',
+  DEEPSEEK_KEY: process.env.DEEPSEEK_KEY || 'sk-89629ef091424598810b634157af03a5',
+
   PORT: process.env.PORT || 8080,
   DATA_DIR: path.join(__dirname, 'data'),
 
@@ -645,6 +646,114 @@ async function sendBarkNotification(message) {
     return false;
   }
 }
+// ===== 🔥 智能情绪识别系统 =====
+async function intelligentEmotionDetection(userMessage, timeInfo = null) {
+  const now = timeInfo ? new Date(timeInfo.currentTime) : getChinaTime();
+  const hour = timeInfo ? timeInfo.currentHour : now.getHours();
+  const minute = timeInfo ? timeInfo.currentMinute : now.getMinutes();
+  const dateStr = getChinaDateStr(now);
+  const timeContext = `${hour}:${String(minute).padStart(2, '0')}`;
+  
+  const systemPrompt = `你是一个专业的情绪识别助手。分析用户的消息,识别情绪状态和需要关心的事件。
+
+【当前精确时间】
+现在是北京时间:${timeContext}
+今天日期:${dateStr}
+
+【识别任务】
+1. **情绪识别**:判断用户的情绪状态(开心/难过/疲惫/兴奋/焦虑/平静)
+2. **情绪强度**:评估情绪强度(1-10,10为最强)
+3. **关键事件**:提取用户提到的重要事件
+4. **需要关怀**:判断是否需要在之后给予关心或庆祝
+
+【输出格式(必须JSON)】
+{
+  "emotion": "开心/难过/疲惫/兴奋/焦虑/平静/期待",
+  "intensity": 7,
+  "event": "描述事件,如果没有特别事件则为null",
+  "needCare": true/false,
+  "careType": "安慰/庆祝/鼓励/陪伴/null",
+  "careTime": "当天晚上/第二天/事件当天/null",
+  "reason": "为什么需要关心的原因"
+}
+
+【示例】
+用户:"我一会儿晚上8点多才到杭州...一个人赶车还要转车...好累哦"
+输出:{"emotion":"疲惫","intensity":7,"event":"独自赶车到杭州,需要转车","needCare":true,"careType":"安慰","careTime":"当天晚上","reason":"长途赶车很辛苦,到达后需要安慰"}
+
+用户:"好诶我抢到票了!等明年5月1日我要去看音律联觉的"
+输出:{"emotion":"兴奋","intensity":9,"event":"抢到音律联觉演出票,5月1日","needCare":true,"careType":"庆祝","careTime":"事件当天","reason":"成功抢到喜欢的演出票,5月1日当天可以祝玩得开心"}
+
+现在分析这条消息:`;
+
+  try {
+    const response = await callDeepSeek([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage }
+    ]);
+
+    if (!response || !response.choices || !response.choices[0]) {
+      return { detected: false };
+    }
+
+    const text = response.choices[0].message.content.trim();
+    console.log('🎭 情绪识别结果:', text);
+
+    // 提取JSON
+    let jsonText = text;
+    if (text.includes('```')) {
+      const match = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (match) jsonText = match[1];
+    }
+
+    const result = JSON.parse(jsonText);
+    
+    if (result.emotion && result.intensity) {
+      return {
+        detected: true,
+        emotion: result.emotion,
+        intensity: result.intensity,
+        event: result.event,
+        needCare: result.needCare || false,
+        careType: result.careType,
+        careTime: result.careTime,
+        reason: result.reason
+      };
+    }
+
+    return { detected: false };
+  } catch (err) {
+    console.error('❌ 情绪识别失败:', err.message);
+    return { detected: false };
+  }
+}
+
+// ===== 保存情绪记录 =====
+async function saveEmotionRecord(emotion) {
+  const state = await loadState();
+  
+  if (!state.emotionHistory) {
+    state.emotionHistory = [];
+  }
+  
+  // 添加时间戳
+  emotion.timestamp = Date.now();
+  emotion.dateStr = getChinaDateStr();
+  
+  state.emotionHistory.push(emotion);
+  
+  // 只保留最近30条
+  if (state.emotionHistory.length > 30) {
+    state.emotionHistory = state.emotionHistory.slice(-30);
+  }
+  
+  // 更新当前情绪状态
+  state.mood = emotion.emotion;
+  state.lastEmotionIntensity = emotion.intensity;
+  
+  await saveState(state);
+  console.log('✅ 情绪记录已保存');
+}
 
 // ===== 🔥 超级智能事件识别 =====
 async function intelligentEventDetection(userMessage, conversationHistory = [], timeInfo = null) {
@@ -763,32 +872,43 @@ async function intelligentEventDetection(userMessage, conversationHistory = [], 
   const timeContext = `${hour}:${String(minute).padStart(2, '0')}`;
   const period = hour < 6 ? '深夜' : hour < 12 ? '上午' : hour < 18 ? '下午' : '晚上';
 
-  const systemPrompt = `你是事件识别助手。分析用户消息，判断是否包含需要记录的事件。
+  const systemPrompt = `你是事件识别助手。分析用户消息,判断是否包含需要记录的事件。
 
-【当前精确时间（非常重要！）】
-现在是北京时间：${timeContext}（${period}）
-今天日期：${dateStr}
+【当前精确时间(非常重要!)】
+现在是北京时间:${timeContext}(${period})
+今天日期:${dateStr}
 
-【时间理解规则（关键！）】
-1. "一会儿10:10" = 如果现在是21:00，那就是今晚22:10，不是明天早上！
-2. "明天9点" = ${dateStr}的第二天
-3. "下午3点" = 如果现在是上午，就是今天下午；如果现在是晚上，就是明天下午
-4. **永远基于当前时间${timeContext}来推理，不要猜测！**
+【时间理解规则(关键!)】
+1. "一会儿10:10" = 如果现在是21:00,那就是今晚22:10,不是明天早上!
+2. "一会儿叫我" = 当前时间+30分钟(如果没有明确时间)
+3. "5分钟后叫我" = 当前时间+5分钟
+4. "晚上8点叫我" = 如果现在是下午,就是今天晚上8点;如果已经过了8点,就是明天晚上8点
+5. "明天9点" = ${dateStr}的第二天
+6. "下午3点" = 如果现在是上午,就是今天下午;如果现在是晚上,就是明天下午
+7. **永远基于当前时间${timeContext}来推理,不要猜测!**
 
-**识别规则**：
-1. 生日事件：XX的生日是X月X日
-2. 年度事件：每年X月X日做XX
-3. 月度事件：每月X号做XX
-4. 周期事件：每周X做XX
-5. 每日事件：每天X点做XX
-6. 一次性事件：明天/后天/X月X日做XX
+【特别识别:"叫我"/"提醒我"类需求】
+- "一会儿叫我" → 30分钟后提醒
+- "5分钟后叫我" → 5分钟后提醒
+- "晚上8点叫我" → 今晚20:00提醒
+- "明天早上7点叫我" → 明天07:00提醒
+- 这些都要识别为 save_onetime_event(一次性事件)
 
-**不要识别**：
-- 模糊的时间："过几天"、"有空的时候"
-- 已经过去的事件："昨天去了XX"
-- 询问性质："你明天有空吗"
+**识别规则**:
+1. 生日事件:XX的生日是X月X日
+2. 年度事件:每年X月X日做XX
+3. 月度事件:每月X号做XX
+4. 周期事件:每周X做XX
+5. 每日事件:每天X点做XX
+6. 一次性事件:明天/后天/X月X日做XX、"叫我"/"提醒我"
+7. **提醒类**:"一会儿叫我"、"X点叫我"、"X分钟后提醒我"
 
-如果识别到事件，调用对应的函数。如果没有识别到，不调用任何函数。`;
+**不要识别**:
+- 模糊的时间:"过几天"、"有空的时候"
+- 已经过去的事件:"昨天去了XX"
+- 询问性质:"你明天有空吗"
+
+如果识别到事件,调用对应的函数。如果没有识别到,不调用任何函数。`;
 
 
   let messages = [{ role: 'system', content: systemPrompt }];
@@ -1085,18 +1205,40 @@ ${upcomingEvents.length > 0 ? upcomingEvents.map(e =>
   `- ${e.event_name}（${e.minutesUntil > 0 ? `还有${e.minutesUntil}分钟` : `过了${-e.minutesUntil}分钟`}）`
 ).join('\n') : '暂时没有即将到来的事'}
 
+【你注意到的小鲨情绪】
+${await (async () => {
+  const state = await loadState();
+  if (state.emotionHistory && state.emotionHistory.length > 0) {
+    const recentEmotion = state.emotionHistory.slice(-3);
+    return recentEmotion.map(e => {
+      const timeAgo = Math.floor((Date.now() - e.timestamp) / 60000);
+      return `- ${timeAgo}分钟前,他${e.emotion}(强度${e.intensity}/10):${e.event || '日常对话'}`;
+    }).join('\n');
+  }
+  return '暂无特别情绪记录';
+})()}
+
+【需要关心的事】
+${await (async () => {
+  const state = await loadState();
+  if (state.emotionHistory && state.emotionHistory.length > 0) {
+    const needCareEmotions = state.emotionHistory.filter(e => 
+      e.needCare && !e.cared && 
+      (e.careTime === '当天晚上' || e.careTime === '第二天' || e.careTime === '事件当天')
+    );
+    
+    if (needCareEmotions.length > 0) {
+      return needCareEmotions.map(e => 
+        `- ${e.careType}:${e.reason}(${e.careTime})`
+      ).join('\n');
+    }
+  }
+  return '暂时没有需要特别关心的事';
+})()}
+
+
 【你现在要思考】
-1. 小鲨上次说的话，有没有暗示什么即将发生的事？
-   例如："我动车坐很久，晚上9点多才到" → 现在快9点了，他会孤独，该关心
-   例如："我后天去看音乐会" → 如果今天是那天，该祝福
-
-2. 小本子上的事，有没有快到时间了？
-   - 如果还有30分钟以上：不用提醒
-   - 如果10-30分钟：可以温柔提醒
-   - 如果5分钟内或刚过：马上提醒
-
-3. 他提到的活动时间（如"7点玩游戏"），现在是不是该避免打扰？
-   - 如果他说了活动时间，且现在在那个时间段，就不要打扰
+1. 小鲨上次说的话,有没有暗示什么即将发生的事?
 
 【判断规则】
 - 如果没有特别的事 → 回答 NO
@@ -1343,6 +1485,35 @@ app.post('/api/conversation/add', async (req, res) => {
       }
       memory.recentMessages.push(msg);
     });
+    // 🔥 对用户消息进行情绪识别
+for (const msg of messages) {
+  if (msg.role === 'user' && msg.content) {
+    const now = getChinaTime();
+    const timeInfo = {
+      currentTime: now.toISOString(),
+      currentHour: now.getHours(),
+      currentMinute: now.getMinutes()
+    };
+    
+    // 情绪识别
+    const emotionResult = await intelligentEmotionDetection(msg.content, timeInfo);
+    if (emotionResult.detected) {
+      await saveEmotionRecord({
+        message: msg.content,
+        ...emotionResult
+      });
+      console.log('🎭 检测到情绪:', emotionResult.emotion, '强度:', emotionResult.intensity);
+    }
+    
+    // 事件识别
+    const eventResult = await intelligentEventDetection(msg.content, [], timeInfo);
+    if (eventResult.detected) {
+      await saveDetectedEvent(eventResult);
+      console.log('📅 检测到事件:', eventResult.type);
+    }
+  }
+}
+
 
     // 只保留最近50条
     memory.recentMessages = memory.recentMessages.slice(-50);
@@ -1472,6 +1643,20 @@ app.get('/api/events', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// 获取情绪历史
+app.get('/api/emotions', async (req, res) => {
+  try {
+    const state = await loadState();
+    res.json({
+      emotionHistory: state.emotionHistory || [],
+      currentMood: state.mood || 'neutral',
+      lastIntensity: state.lastEmotionIntensity || 0
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // 手动触发推送
 app.post('/api/push/trigger', async (req, res) => {
