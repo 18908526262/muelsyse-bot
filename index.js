@@ -760,6 +760,10 @@ async function intelligentEventDetection(userMessage, conversationHistory = [], 
   const tools = [
     {
       type: 'function',
+      function: {
+
+    {
+      type: 'function',
 
 
       type: 'function',
