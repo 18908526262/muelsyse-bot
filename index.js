@@ -757,13 +757,26 @@ async function saveEmotionRecord(emotion) {
 
 // ===== 🔥 超级智能事件识别 =====
 async function intelligentEventDetection(userMessage, conversationHistory = [], timeInfo = null) {
-  const tools = [
+    const tools = [
     {
       type: 'function',
       function: {
-
+        name: 'save_onetime_important_event',
+        description: '保存重要的一次性事件，如考试、面试、旅行等',
+        parameters: {
+          type: 'object',
+          properties: {
+            date: { type: 'string', description: '日期格式 YYYY-MM-DD' },
+            time: { type: 'string', description: '时间，格式HH:mm，可选' },
+            event_name: { type: 'string' },
+            custom_message: { type: 'string' }
+          },
+          required: ['date', 'event_name']
+        }
+      }
+    },
     {
-      type: 'function',
+
 
 
       type: 'function',
