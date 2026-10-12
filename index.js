@@ -889,27 +889,38 @@ async function intelligentEventDetection(userMessage, conversationHistory = [], 
   const timeContext = `${hour}:${String(minute).padStart(2, '0')}`;
   const period = hour < 6 ? '深夜' : hour < 12 ? '上午' : hour < 18 ? '下午' : '晚上';
 
-  const systemPrompt = `你是事件识别助手。分析用户消息,判断是否包含需要记录的事件。
+    const systemPrompt = `你是事件识别助手。分析用户消息,判断是否包含需要记录的事件。
 
 【当前精确时间(非常重要!)】
 现在是北京时间:${timeContext}(${period})
 今天日期:${dateStr}
 
 【时间理解规则(关键!)】
-1. "一会儿10:10" = 如果现在是21:00,那就是今晚22:10,不是明天早上!
-2. "一会儿叫我" = 当前时间+30分钟(如果没有明确时间)
+1. "一会儿12:30" = 如果现在是12:19,那就是今天12:30(11分钟后)
+2. "一会儿叫我" = 当前时间+30分钟
 3. "5分钟后叫我" = 当前时间+5分钟
 4. "晚上8点叫我" = 如果现在是下午,就是今天晚上8点;如果已经过了8点,就是明天晚上8点
 5. "明天9点" = ${dateStr}的第二天
 6. "下午3点" = 如果现在是上午,就是今天下午;如果现在是晚上,就是明天下午
 7. **永远基于当前时间${timeContext}来推理,不要猜测!**
 
-【特别识别:"叫我"/"提醒我"类需求】
-- "一会儿叫我" → 30分钟后提醒
-- "5分钟后叫我" → 5分钟后提醒
-- "晚上8点叫我" → 今晚20:00提醒
-- "明天早上7点叫我" → 明天07:00提醒
-- 这些都要识别为 save_onetime_event(一次性事件)
+【🔥🔥🔥 特别识别:"叫我"/"提醒我"类需求 - 这是最重要的！】
+只要用户说了"提醒我"、"叫我"、"记得提醒"、"别忘了提醒"等词，就必须识别为事件！
+
+示例1：用户说"一会儿12:30提醒我拿纸巾"
+→ 当前时间12:19，那么12:30就是今天12:30
+→ 调用save_onetime_event(date: "${dateStr}", time: "12:30", event_name: "拿纸巾")
+
+示例2：用户说"提醒我一会儿下载文件"
+→ 没有明确时间，默认30分钟后
+→ 调用save_onetime_event(date: "计算后的日期", time: "计算后的时间", event_name: "下载文件")
+
+示例3：用户说"一会儿1点整记得叫我"
+→ 当前12:19，1点整=13:00
+→ 调用save_onetime_event(date: "${dateStr}", time: "13:00", event_name: "提醒")
+
+示例4：用户说"明天早上7点叫我起床"
+→ 调用save_onetime_event(date: "明天日期", time: "07:00", event_name: "起床")
 
 **识别规则**:
 1. 生日事件:XX的生日是X月X日
@@ -917,15 +928,15 @@ async function intelligentEventDetection(userMessage, conversationHistory = [], 
 3. 月度事件:每月X号做XX
 4. 周期事件:每周X做XX
 5. 每日事件:每天X点做XX
-6. 一次性事件:明天/后天/X月X日做XX、"叫我"/"提醒我"
-7. **提醒类**:"一会儿叫我"、"X点叫我"、"X分钟后提醒我"
+6. 🔥🔥 一次性事件(最重要):只要提到"提醒"、"叫我"、"别忘了"就识别！
+7. **提醒类关键词**:"提醒"、"叫我"、"别忘"、"记得"、"一定要"
 
 **不要识别**:
-- 模糊的时间:"过几天"、"有空的时候"
+- 模糊的时间:"过几天"、"有空的时候"(但"一会儿"要识别!)
 - 已经过去的事件:"昨天去了XX"
 - 询问性质:"你明天有空吗"
 
-如果识别到事件,调用对应的函数。如果没有识别到,不调用任何函数。`;
+🔥 如果识别到任何"提醒"相关的词，立即调用save_onetime_event函数！即使时间模糊，也要计算一个时间点保存！`;
 
 
   let messages = [{ role: 'system', content: systemPrompt }];
@@ -966,11 +977,82 @@ async function intelligentEventDetection(userMessage, conversationHistory = [], 
   }
 }
 
-false };
+// ===== 保存事件函数 =====
+async function saveDetectedEvent(detection) {
+  const events = await loadEvents();
+  const now = new Date();
+
+  switch (detection.type) {
+    case 'save_birthday_event':
+      events.yearly.push({
+        type: 'birthday',
+        month: detection.args.month,
+        day: detection.args.day,
+        person_name: detection.args.person_name,
+        custom_message: detection.args.custom_message || null,
+        lastFired: null,          // 🔥 当天去重用
+        created_at: now.toISOString()
+      });
+      break;
+
+    case 'save_yearly_event':
+      events.yearly.push({
+        type: 'yearly',
+        month: detection.args.month,
+        day: detection.args.day,
+        event_name: detection.args.event_name,
+        custom_message: detection.args.custom_message || null,
+        lastFired: null,          // 🔥
+        created_at: now.toISOString()
+      });
+      break;
+
+    case 'save_monthly_event':
+      events.monthly.push({
+        day: detection.args.day,
+        event_name: detection.args.event_name,
+        custom_message: detection.args.custom_message || null,
+        lastFired: null,          // 🔥
+        created_at: now.toISOString()
+      });
+      break;
+
+    case 'save_weekly_event':
+      events.weekly.push({
+        weekday: detection.args.weekday,
+        time: detection.args.time || null,
+        event_name: detection.args.event_name,
+        custom_message: detection.args.custom_message || null,
+        lastFired: null,          // 🔥
+        created_at: now.toISOString()
+      });
+      break;
+
+    case 'save_daily_event':
+      events.daily.push({
+        time: detection.args.time,
+        event_name: detection.args.event_name,
+        custom_message: detection.args.custom_message || null,
+        lastFired: null,          // 🔥
+        created_at: now.toISOString()
+      });
+      break;
+
+    case 'save_onetime_event':
+      events.onetime.push({
+        date: detection.args.date,
+        time: detection.args.time || null,
+        event_name: detection.args.event_name,
+        custom_message: detection.args.custom_message || null,
+        created_at: now.toISOString(),
+        notified: false
+      });
+      break;
   }
+
+  await saveEvents(events);
+  console.log('✅ 事件已保存');
 }
-
-
 
 // ===== 检查触发事件（🔥 中国时间 + 当天去重 + 30 分钟触发窗口）=====
 async function checkTriggeredEvents() {
