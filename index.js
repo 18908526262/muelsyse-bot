@@ -1323,19 +1323,39 @@ async function mainPushLoop() {
       if (pushLog.count >= CONFIG.ULTRA_HONEYMOON_MODE.DAILY_TARGET) {
         console.log('📊 今日已达推送上限');
         return;
-      }      // 🔥 检查游戏是否真正活跃（5分钟内有对话或触碰交互才跳过）
+      }     
+            // 🔥 检查游戏是否在前台（需要前端定期上报）
+      if (state.gameStatus && state.gameStatus.isForeground) {
+        const statusAge = now - (state.gameStatus.lastUpdate || 0);
+        // 如果状态是30秒内上报的，且游戏在前台，就跳过推送
+        if (statusAge < 30 * 1000) {
+          console.log('🎮 游戏在前台运行，跳过主动推送');
+          return;
+        }
+      }
+
+      // 🔥 检查用户是否最近活跃过（15分钟内有对话就跳过）
       const memory = await loadConversationMemory();
       if (memory.recentMessages && memory.recentMessages.length > 0) {
-        const lastMessage = memory.recentMessages[memory.recentMessages.length - 1];
-        // 只有用户发送的消息才算真正活跃
-        if (lastMessage.role === 'user') {
-          const timeSinceLastUserMessage = now - (lastMessage.timestamp || 0);
-          if (timeSinceLastUserMessage < 5 * 60 * 1000) {
-            console.log('💬 用户正在对话中（' + Math.floor(timeSinceLastUserMessage / 60000) + '分钟前发消息），跳过主动推送');
+        // 向前找最后一条用户消息
+        let lastUserMessageTime = 0;
+        for (let i = memory.recentMessages.length - 1; i >= 0; i--) {
+          if (memory.recentMessages[i].role === 'user') {
+            lastUserMessageTime = memory.recentMessages[i].timestamp || 0;
+            break;
+          }
+        }
+        
+        if (lastUserMessageTime > 0) {
+          const timeSinceLastUserMessage = now - lastUserMessageTime;
+          // 用户说话后15分钟内不要主动推送
+          if (timeSinceLastUserMessage < 15 * 60 * 1000) {
+            console.log('💬 用户最近活跃过（' + Math.floor(timeSinceLastUserMessage / 60000) + '分钟前），跳过主动推送');
             return;
           }
         }
       }
+
 
 
 
@@ -1615,6 +1635,25 @@ app.get('/api/state', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// 🔥 前端上报游戏状态（前台/后台）
+app.post('/api/game/status', async (req, res) => {
+  try {
+    const { isForeground } = req.body;
+    const state = await loadState();
+    
+    state.gameStatus = {
+      isForeground: isForeground,
+      lastUpdate: Date.now()
+    };
+    
+    await saveState(state);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // 🔥 事件识别接口
 app.post('/api/events/detect', async (req, res) => {
