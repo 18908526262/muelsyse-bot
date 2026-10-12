@@ -1503,6 +1503,18 @@ async function mainPushLoop() {
 
 // ===== API 路由 =====
 
+// 根路径（Railway 健康检查需要）
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: '缪尔赛思后端',
+    version: '8.2',
+    timestamp: new Date().toISOString(),
+    chinaTime: getChinaStamp(),
+    city: CITY.name
+  });
+});
+
 // 健康检查（带上中国时间，方便一眼确认时区对不对）
 app.get('/health', (req, res) => {
   res.json({
@@ -1511,6 +1523,7 @@ app.get('/health', (req, res) => {
     chinaTime: getChinaStamp()
   });
 });
+
 
 // 🔥 添加对话记录（前端调用）
 app.post('/api/conversation/add', async (req, res) => {
