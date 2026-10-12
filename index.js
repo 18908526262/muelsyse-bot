@@ -966,82 +966,11 @@ async function intelligentEventDetection(userMessage, conversationHistory = [], 
   }
 }
 
-// ===== 保存事件函数 =====
-async function saveDetectedEvent(detection) {
-  const events = await loadEvents();
-  const now = new Date();
-
-  switch (detection.type) {
-    case 'save_birthday_event':
-      events.yearly.push({
-        type: 'birthday',
-        month: detection.args.month,
-        day: detection.args.day,
-        person_name: detection.args.person_name,
-        custom_message: detection.args.custom_message || null,
-        lastFired: null,          // 🔥 当天去重用
-        created_at: now.toISOString()
-      });
-      break;
-
-    case 'save_yearly_event':
-      events.yearly.push({
-        type: 'yearly',
-        month: detection.args.month,
-        day: detection.args.day,
-        event_name: detection.args.event_name,
-        custom_message: detection.args.custom_message || null,
-        lastFired: null,          // 🔥
-        created_at: now.toISOString()
-      });
-      break;
-
-    case 'save_monthly_event':
-      events.monthly.push({
-        day: detection.args.day,
-        event_name: detection.args.event_name,
-        custom_message: detection.args.custom_message || null,
-        lastFired: null,          // 🔥
-        created_at: now.toISOString()
-      });
-      break;
-
-    case 'save_weekly_event':
-      events.weekly.push({
-        weekday: detection.args.weekday,
-        time: detection.args.time || null,
-        event_name: detection.args.event_name,
-        custom_message: detection.args.custom_message || null,
-        lastFired: null,          // 🔥
-        created_at: now.toISOString()
-      });
-      break;
-
-    case 'save_daily_event':
-      events.daily.push({
-        time: detection.args.time,
-        event_name: detection.args.event_name,
-        custom_message: detection.args.custom_message || null,
-        lastFired: null,          // 🔥
-        created_at: now.toISOString()
-      });
-      break;
-
-    case 'save_onetime_event':
-      events.onetime.push({
-        date: detection.args.date,
-        time: detection.args.time || null,
-        event_name: detection.args.event_name,
-        custom_message: detection.args.custom_message || null,
-        created_at: now.toISOString(),
-        notified: false
-      });
-      break;
+false };
   }
-
-  await saveEvents(events);
-  console.log('✅ 事件已保存');
 }
+
+
 
 // ===== 检查触发事件（🔥 中国时间 + 当天去重 + 30 分钟触发窗口）=====
 async function checkTriggeredEvents() {
