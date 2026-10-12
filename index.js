@@ -1063,15 +1063,17 @@ async function checkTriggeredEvents() {
     changed = true;
   };
 
-  // 触发条件：今天没推过 且（没写时间 → 当天任意时刻；写了时间 → 到点后 30 分钟内）
+    // 触发条件：今天没推过 且 精确到分钟匹配
   const inWindow = (timeStr, lastFired) => {
     if (lastFired === today) return false;
     if (!timeStr) return true;
     const parts = String(timeStr).split(':').map(Number);
     if (parts.length < 2 || isNaN(parts[0]) || isNaN(parts[1])) return true;
     const t = parts[0] * 60 + parts[1];
-    return nowMinutes >= t && nowMinutes - t < 30;
+    // 精确匹配：当前时间在设定时间后的3分钟内（配合3分钟检查间隔）
+    return nowMinutes >= t && nowMinutes - t < 3;
   };
+
 
   // 检查生日和年度事件
   events.yearly.forEach(event => {
